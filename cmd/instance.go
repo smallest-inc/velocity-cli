@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	autokeys "github.com/smallest-inc/velocity-cli/internal/keys"
 	"github.com/smallest-inc/velocity-cli/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -211,6 +212,7 @@ Non-interactive mode (for scripting and agentic control):
 		nameFlag, _ := cmd.Flags().GetString("name")
 		lcFlag, _ := cmd.Flags().GetString("launch-config")
 		keysFlag, _ := cmd.Flags().GetString("ssh-keys")
+		autoKeysFlag, _ := cmd.Flags().GetBool("auto-keys")
 		typeFlag, _ := cmd.Flags().GetString("instance-type")
 		domainFlag, _ := cmd.Flags().GetString("domain")
 		zoneFlag, _ := cmd.Flags().GetString("hosted-zone")
@@ -275,8 +277,16 @@ Non-interactive mode (for scripting and agentic control):
 		}
 
 		// --- SSH Keys ---
+		// Determine if auto-key management should be used:
+		// - Explicit --ssh-keys flag: use those keys, no auto-gen
+		// - Explicit --auto-keys flag: force auto-gen
+		// - No flag provided: auto-gen (implied)
+		// - Interactive mode: offer choice
 		var selectedKeyIDs []string
+		useAutoKeys := false
+
 		if keysFlag != "" {
+			// Explicit key selection — resolve by name/ID
 			requestedKeys := strings.Split(keysFlag, ",")
 			for _, req := range requestedKeys {
 				req = strings.TrimSpace(req)
@@ -292,25 +302,47 @@ Non-interactive mode (for scripting and agentic control):
 					return fmt.Errorf("SSH key %q not found", req)
 				}
 			}
-		} else if len(keys) > 0 {
-			if interactive {
-				keyNames := make([]string, len(keys))
-				for i, k := range keys {
-					keyNames[i] = fmt.Sprintf("%s (%s)", k.Name, k.Fingerprint[:16]+"...")
-				}
-				keyIdxs, err := ui.MultiSelect("Select SSH keys to authorize", keyNames)
-				if err != nil {
-					return err
-				}
-				for _, idx := range keyIdxs {
-					selectedKeyIDs = append(selectedKeyIDs, keys[idx].ID)
-				}
-			} else {
-				// Non-interactive with no --ssh-keys: use all keys
-				for _, k := range keys {
-					selectedKeyIDs = append(selectedKeyIDs, k.ID)
-				}
+		} else if autoKeysFlag || !interactive {
+			// Non-interactive with no --ssh-keys: auto-generate
+			useAutoKeys = true
+		} else {
+			// Interactive: offer choice
+			options := []string{"Auto-manage SSH key (recommended)"}
+			for _, k := range keys {
+				options = append(options, fmt.Sprintf("%s (%s)", k.Name, k.Fingerprint[:16]+"..."))
 			}
+			idx, err := ui.Select("SSH key mode", options)
+			if err != nil {
+				return err
+			}
+			if idx == 0 {
+				useAutoKeys = true
+			} else {
+				// They selected a specific key
+				selectedKeyIDs = append(selectedKeyIDs, keys[idx-1].ID)
+			}
+		}
+
+		if useAutoKeys {
+			ui.Info("Generating ephemeral SSH keypair...")
+			pubKey, privPath, err := autokeys.GenerateKeyPair(name)
+			if err != nil {
+				return fmt.Errorf("failed to generate SSH key: %w", err)
+			}
+
+			// Upload to Toggle
+			var uploaded sshKey
+			uploadReq := map[string]string{
+				"name":       "vctl-" + name,
+				"public_key": pubKey,
+			}
+			if err := apiClient.Post(fmt.Sprintf("/projects/%s/cloud/ssh-keys", cfg.ProjectID), uploadReq, &uploaded); err != nil {
+				autokeys.RemoveKeyForInstance(name)
+				return fmt.Errorf("failed to upload SSH key: %w", err)
+			}
+
+			selectedKeyIDs = append(selectedKeyIDs, uploaded.ID)
+			ui.Success(fmt.Sprintf("SSH key generated and uploaded (private key: %s)", privPath))
 		}
 
 		// --- Build request ---
@@ -517,6 +549,23 @@ var instanceTerminateCmd = &cobra.Command{
 		for _, w := range result.Warnings {
 			ui.Warn(w)
 		}
+
+		// Clean up auto-generated SSH key
+		if _, ok := autokeys.FindKeyForInstance(inst.Name); ok {
+			// Delete from Toggle
+			var projectKeys []sshKey
+			if err := apiClient.Get(fmt.Sprintf("/projects/%s/cloud/ssh-keys", cfg.ProjectID), &projectKeys); err == nil {
+				for _, k := range projectKeys {
+					if k.Name == "vctl-"+inst.Name {
+						apiClient.Delete(fmt.Sprintf("/projects/%s/cloud/ssh-keys/%s", cfg.ProjectID, k.ID), nil)
+						break
+					}
+				}
+			}
+			autokeys.RemoveKeyForInstance(inst.Name)
+			ui.Info("Auto-managed SSH key cleaned up")
+		}
+
 		return nil
 	},
 }
@@ -645,7 +694,18 @@ var instanceSSHCmd = &cobra.Command{
 			return fmt.Errorf("instance %q has no public address (state: %s)", inst.Name, inst.InstanceState)
 		}
 
-		// Find matching SSH key
+		// Find SSH key: check vctl auto-managed keys first, then ~/.ssh/
+		if keyPath, ok := autokeys.FindKeyForInstance(inst.Name); ok {
+			ui.Info(fmt.Sprintf("Using auto-managed key: %s", keyPath))
+			sshBin, err := findBinary("ssh")
+			if err != nil {
+				return err
+			}
+			sshArgs := []string{"ssh", "-o", "StrictHostKeyChecking=no", "-i", keyPath, user + "@" + addr}
+			return syscall.Exec(sshBin, sshArgs, os.Environ())
+		}
+
+		// Fall back to matching project keys against ~/.ssh/
 		var keys []sshKey
 		err = apiClient.Get(fmt.Sprintf("/projects/%s/cloud/ssh-keys", cfg.ProjectID), &keys)
 		if err != nil {
@@ -694,6 +754,7 @@ func init() {
 	instanceProvisionCmd.Flags().StringP("instance-type", "t", "", "Override instance type")
 	instanceProvisionCmd.Flags().String("domain", "", "Domain subdomain (enables domain)")
 	instanceProvisionCmd.Flags().String("hosted-zone", "", "Route53 hosted zone ID (for domain)")
+	instanceProvisionCmd.Flags().Bool("auto-keys", false, "Auto-generate and manage SSH keypair (implied when --ssh-keys not provided)")
 	instanceProvisionCmd.Flags().Bool("no-wait", false, "Don't wait for instance to reach running state")
 
 	instanceTerminateCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
