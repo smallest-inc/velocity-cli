@@ -1,0 +1,710 @@
+package cmd
+
+import (
+	"crypto/md5"
+	"encoding/base64"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/smallest-inc/velocity-cli/internal/ui"
+	"github.com/spf13/cobra"
+)
+
+type instance struct {
+	ID               string  `json:"id"`
+	ProjectID        string  `json:"project_id"`
+	Name             string  `json:"name"`
+	InstanceID       string  `json:"instance_id"`
+	InstanceState    string  `json:"instance_state"`
+	InstanceType     string  `json:"instance_type"`
+	Region           string  `json:"region"`
+	PublicIP         string  `json:"public_ip"`
+	PrivateIP        string  `json:"private_ip"`
+	ElasticIPAddress string  `json:"elastic_ip_address"`
+	DomainEnabled    bool    `json:"domain_enabled"`
+	DomainName       string  `json:"domain_name"`
+	AvailabilityZone string  `json:"availability_zone"`
+	RodentNodeID     string  `json:"rodent_node_id"`
+	LaunchConfigID   string  `json:"launch_config_id"`
+	ProvisionedBy    string  `json:"provisioned_by"`
+	ProvisionedAt    string  `json:"provisioned_at"`
+	TerminatedAt     *string `json:"terminated_at"`
+}
+
+type launchConfig struct {
+	ID                    string  `json:"id"`
+	Name                  string  `json:"name"`
+	InstanceType          string  `json:"instance_type"`
+	Region                string  `json:"region"`
+	LaunchTemplateID      string  `json:"launch_template_id"`
+	LaunchTemplateVersion string  `json:"launch_template_version"`
+	ProjectID             *string `json:"project_id"`
+	AMI                   string  `json:"ami"`
+	EBSVolumeGB           int     `json:"ebs_volume_gb"`
+	IsDefault             bool    `json:"is_default"`
+}
+
+type sshKey struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	PublicKey   string `json:"public_key"`
+	Fingerprint string `json:"fingerprint"`
+	ProjectID   string `json:"project_id"`
+	CreatedAt   string `json:"created_at"`
+}
+
+// effectiveAddress returns the best available address for an instance.
+func (inst *instance) effectiveAddress() string {
+	if inst.ElasticIPAddress != "" {
+		return inst.ElasticIPAddress
+	}
+	if inst.DomainName != "" {
+		return inst.DomainName
+	}
+	if inst.PublicIP != "" {
+		return inst.PublicIP
+	}
+	return ""
+}
+
+// stateColor returns a color-coded state string.
+func stateColor(state string) string {
+	switch state {
+	case "running":
+		return ui.Green(state)
+	case "stopped":
+		return ui.Red(state)
+	case "pending", "stopping":
+		return ui.Yellow(state)
+	case "terminated", "shutting-down":
+		return ui.Gray(state)
+	default:
+		return state
+	}
+}
+
+// findInstance finds an instance by name or ID.
+func findInstance(nameOrID string) (*instance, error) {
+	var instances []instance
+	err := apiClient.Get(fmt.Sprintf("/projects/%s/cloud/instances", cfg.ProjectID), &instances)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range instances {
+		if instances[i].Name == nameOrID || instances[i].ID == nameOrID || instances[i].InstanceID == nameOrID {
+			return &instances[i], nil
+		}
+	}
+	return nil, fmt.Errorf("instance %q not found", nameOrID)
+}
+
+// pollInstanceStatus polls until the instance reaches the target state or times out.
+func pollInstanceStatus(instanceID string, targetState string, timeout time.Duration) (*instance, error) {
+	deadline := time.Now().Add(timeout)
+	path := fmt.Sprintf("/projects/%s/cloud/instances/%s/status", cfg.ProjectID, instanceID)
+	for {
+		var inst instance
+		if err := apiClient.Get(path, &inst); err != nil {
+			return nil, err
+		}
+		if inst.InstanceState == targetState {
+			return &inst, nil
+		}
+		if time.Now().After(deadline) {
+			return &inst, fmt.Errorf("timed out waiting for state %q (current: %s)", targetState, inst.InstanceState)
+		}
+		time.Sleep(3 * time.Second)
+	}
+}
+
+var instanceCmd = &cobra.Command{
+	Use:   "instance",
+	Short: "Manage cloud instances",
+}
+
+var instanceListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all instances in the active project",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireProject(); err != nil {
+			return err
+		}
+
+		var instances []instance
+		stop := ui.Spinner("Fetching instances")
+		err := apiClient.Get(fmt.Sprintf("/projects/%s/cloud/instances", cfg.ProjectID), &instances)
+		stop()
+
+		if err != nil {
+			return err
+		}
+
+		if len(instances) == 0 {
+			ui.Warn("No instances found.")
+			return nil
+		}
+
+		headers := []string{"NAME", "STATE", "INSTANCE ID", "TYPE", "ADDRESS", "REGION"}
+		var rows [][]string
+		for _, inst := range instances {
+			addr := inst.effectiveAddress()
+			if inst.DomainEnabled && inst.DomainName != "" {
+				addr = inst.DomainName
+			}
+			rows = append(rows, []string{
+				inst.Name,
+				stateColor(inst.InstanceState),
+				inst.InstanceID,
+				inst.InstanceType,
+				addr,
+				inst.Region,
+			})
+		}
+		ui.Table(headers, rows)
+		return nil
+	},
+}
+
+var instanceProvisionCmd = &cobra.Command{
+	Use:   "provision",
+	Short: "Provision a new cloud instance",
+	Long: `Provision a new cloud instance.
+
+Interactive mode (default when stdin is a TTY):
+  vctl instance provision
+
+Non-interactive mode (for scripting and agentic control):
+  vctl instance provision --name prod-01 --launch-config <id-or-name> --ssh-keys <name1>,<name2>
+  vctl instance provision --name prod-01 --launch-config "Velocity Dev" --ssh-keys raam-ed25519 --instance-type t3.large`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireProject(); err != nil {
+			return err
+		}
+
+		// Fetch launch configs (needed for both modes)
+		var configs []launchConfig
+		stop := ui.Spinner("Fetching launch configurations")
+		err := apiClient.Get(fmt.Sprintf("/projects/%s/cloud/launch-configs", cfg.ProjectID), &configs)
+		stop()
+		if err != nil {
+			return err
+		}
+		if len(configs) == 0 {
+			return fmt.Errorf("no launch configurations available. Create one first")
+		}
+
+		// Fetch SSH keys (needed for both modes)
+		var keys []sshKey
+		stop = ui.Spinner("Fetching SSH keys")
+		err = apiClient.Get(fmt.Sprintf("/projects/%s/cloud/ssh-keys", cfg.ProjectID), &keys)
+		stop()
+		if err != nil {
+			return err
+		}
+
+		// Resolve parameters — flags take precedence, fall back to interactive prompts
+		nameFlag, _ := cmd.Flags().GetString("name")
+		lcFlag, _ := cmd.Flags().GetString("launch-config")
+		keysFlag, _ := cmd.Flags().GetString("ssh-keys")
+		typeFlag, _ := cmd.Flags().GetString("instance-type")
+		domainFlag, _ := cmd.Flags().GetString("domain")
+		zoneFlag, _ := cmd.Flags().GetString("hosted-zone")
+		noWaitFlag, _ := cmd.Flags().GetBool("no-wait")
+
+		// Determine mode: if --name flag is set, treat as non-interactive (skip all prompts)
+		interactive := nameFlag == "" && ui.IsInteractive()
+
+		// --- Name ---
+		name := nameFlag
+		if name == "" {
+			if !interactive {
+				return fmt.Errorf("--name is required in non-interactive mode")
+			}
+			name = ui.Prompt("Instance name")
+			if name == "" {
+				return fmt.Errorf("instance name is required")
+			}
+		}
+
+		// --- Launch Config ---
+		var selectedConfig launchConfig
+		if lcFlag != "" {
+			found := false
+			for _, c := range configs {
+				if c.ID == lcFlag || c.Name == lcFlag {
+					selectedConfig = c
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("launch config %q not found", lcFlag)
+			}
+		} else {
+			if !interactive {
+				// Use default if available
+				for _, c := range configs {
+					if c.IsDefault {
+						selectedConfig = c
+						break
+					}
+				}
+				if selectedConfig.ID == "" {
+					return fmt.Errorf("--launch-config is required (no default config available)")
+				}
+			} else {
+				configNames := make([]string, len(configs))
+				for i, c := range configs {
+					scope := "tenant"
+					if c.ProjectID != nil {
+						scope = "project"
+					}
+					configNames[i] = fmt.Sprintf("%s (%s, %s) [%s]", c.Name, c.InstanceType, c.Region, scope)
+				}
+				configIdx, err := ui.Select("Select launch configuration", configNames)
+				if err != nil {
+					return err
+				}
+				selectedConfig = configs[configIdx]
+			}
+		}
+
+		// --- SSH Keys ---
+		var selectedKeyIDs []string
+		if keysFlag != "" {
+			requestedKeys := strings.Split(keysFlag, ",")
+			for _, req := range requestedKeys {
+				req = strings.TrimSpace(req)
+				found := false
+				for _, k := range keys {
+					if k.ID == req || k.Name == req {
+						selectedKeyIDs = append(selectedKeyIDs, k.ID)
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("SSH key %q not found", req)
+				}
+			}
+		} else if len(keys) > 0 {
+			if interactive {
+				keyNames := make([]string, len(keys))
+				for i, k := range keys {
+					keyNames[i] = fmt.Sprintf("%s (%s)", k.Name, k.Fingerprint[:16]+"...")
+				}
+				keyIdxs, err := ui.MultiSelect("Select SSH keys to authorize", keyNames)
+				if err != nil {
+					return err
+				}
+				for _, idx := range keyIdxs {
+					selectedKeyIDs = append(selectedKeyIDs, keys[idx].ID)
+				}
+			} else {
+				// Non-interactive with no --ssh-keys: use all keys
+				for _, k := range keys {
+					selectedKeyIDs = append(selectedKeyIDs, k.ID)
+				}
+			}
+		}
+
+		// --- Build request ---
+		reqBody := map[string]interface{}{
+			"name":             name,
+			"launch_config_id": selectedConfig.ID,
+			"ssh_key_ids":      selectedKeyIDs,
+		}
+
+		// Overrides
+		overrides := map[string]interface{}{}
+		if typeFlag != "" {
+			overrides["instance_type"] = typeFlag
+		} else if interactive {
+			if v := ui.Prompt("Instance type override (enter to skip)"); v != "" {
+				overrides["instance_type"] = v
+			}
+		}
+		if len(overrides) > 0 {
+			reqBody["overrides"] = overrides
+		}
+
+		// Domain
+		if domainFlag != "" {
+			domain := map[string]interface{}{
+				"enabled":   true,
+				"subdomain": domainFlag,
+			}
+			if zoneFlag != "" {
+				domain["hosted_zone_id"] = zoneFlag
+			}
+			reqBody["domain"] = domain
+		}
+
+		// --- Provision ---
+		stop = ui.Spinner("Provisioning instance")
+		var result struct {
+			Instance     instance `json:"instance"`
+			RodentNodeID string   `json:"rodent_node_id"`
+			DomainName   string   `json:"domain_name"`
+		}
+		err = apiClient.Post(fmt.Sprintf("/projects/%s/cloud/instances", cfg.ProjectID), reqBody, &result)
+		stop()
+		if err != nil {
+			return err
+		}
+
+		ui.Success(fmt.Sprintf("Instance %q provisioned", result.Instance.Name))
+		fmt.Println()
+		fmt.Printf("  Instance ID:  %s\n", ui.Cyan(result.Instance.InstanceID))
+		fmt.Printf("  State:        %s\n", stateColor(result.Instance.InstanceState))
+		fmt.Printf("  Type:         %s\n", result.Instance.InstanceType)
+		fmt.Printf("  Region:       %s\n", result.Instance.Region)
+
+		addr := result.Instance.effectiveAddress()
+		if addr != "" {
+			fmt.Printf("  Address:      %s\n", ui.Cyan(addr))
+		}
+		if result.Instance.DomainName != "" {
+			fmt.Printf("  Domain:       %s\n", ui.Cyan(result.Instance.DomainName))
+		}
+
+		// Poll until running (unless --no-wait)
+		if !noWaitFlag && result.Instance.InstanceState != "running" {
+			fmt.Println()
+			stop = ui.Spinner("Waiting for instance to start")
+			inst, err := pollInstanceStatus(result.Instance.ID, "running", 5*time.Minute)
+			stop()
+			if err != nil {
+				ui.Warn(fmt.Sprintf("Instance may still be starting: %v", err))
+			} else {
+				ui.Success("Instance is running")
+				addr = inst.effectiveAddress()
+			}
+		}
+
+		if addr != "" {
+			fmt.Println()
+			ui.Info(fmt.Sprintf("Connect with: ssh ubuntu@%s", addr))
+		}
+
+		return nil
+	},
+}
+
+var instanceStartCmd = &cobra.Command{
+	Use:   "start <name-or-id>",
+	Short: "Start a stopped instance",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireProject(); err != nil {
+			return err
+		}
+
+		stop := ui.Spinner("Finding instance")
+		inst, err := findInstance(args[0])
+		stop()
+		if err != nil {
+			return err
+		}
+
+		stop = ui.Spinner(fmt.Sprintf("Starting %s", inst.Name))
+		var result struct {
+			Message  string   `json:"message"`
+			Instance instance `json:"instance"`
+		}
+		err = apiClient.Post(fmt.Sprintf("/projects/%s/cloud/instances/%s/start", cfg.ProjectID, inst.ID), nil, &result)
+		stop()
+
+		if err != nil {
+			return err
+		}
+
+		ui.Success(fmt.Sprintf("Instance %s starting", inst.Name))
+
+		// Poll until running
+		stop = ui.Spinner("Waiting for running state")
+		final, err := pollInstanceStatus(inst.ID, "running", 5*time.Minute)
+		stop()
+
+		if err != nil {
+			ui.Warn(fmt.Sprintf("Instance may still be starting: %v", err))
+		} else {
+			ui.Success(fmt.Sprintf("Instance %s is running", final.Name))
+			if addr := final.effectiveAddress(); addr != "" {
+				ui.Info(fmt.Sprintf("Address: %s", addr))
+			}
+		}
+
+		return nil
+	},
+}
+
+var instanceStopCmd = &cobra.Command{
+	Use:   "stop <name-or-id>",
+	Short: "Stop a running instance",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireProject(); err != nil {
+			return err
+		}
+
+		stop := ui.Spinner("Finding instance")
+		inst, err := findInstance(args[0])
+		stop()
+		if err != nil {
+			return err
+		}
+
+		stopSpinner := ui.Spinner(fmt.Sprintf("Stopping %s", inst.Name))
+		var result struct {
+			Message  string   `json:"message"`
+			Instance instance `json:"instance"`
+		}
+		err = apiClient.Post(fmt.Sprintf("/projects/%s/cloud/instances/%s/stop", cfg.ProjectID, inst.ID), nil, &result)
+		stopSpinner()
+
+		if err != nil {
+			return err
+		}
+
+		ui.Success(fmt.Sprintf("Instance %s is stopping", inst.Name))
+		return nil
+	},
+}
+
+var instanceTerminateCmd = &cobra.Command{
+	Use:   "terminate <name-or-id>",
+	Short: "Terminate an instance (irreversible)",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireProject(); err != nil {
+			return err
+		}
+
+		stop := ui.Spinner("Finding instance")
+		inst, err := findInstance(args[0])
+		stop()
+		if err != nil {
+			return err
+		}
+
+		force, _ := cmd.Flags().GetBool("force")
+		if !force {
+			if !ui.Confirm(fmt.Sprintf("Terminate instance %q? This is irreversible", inst.Name)) {
+				ui.Info("Cancelled")
+				return nil
+			}
+		}
+
+		stop = ui.Spinner(fmt.Sprintf("Terminating %s", inst.Name))
+		var result struct {
+			Message  string   `json:"message"`
+			Warnings []string `json:"warnings"`
+		}
+		err = apiClient.Post(fmt.Sprintf("/projects/%s/cloud/instances/%s/terminate", cfg.ProjectID, inst.ID), nil, &result)
+		stop()
+
+		if err != nil {
+			return err
+		}
+
+		ui.Success(fmt.Sprintf("Instance %s terminated", inst.Name))
+		for _, w := range result.Warnings {
+			ui.Warn(w)
+		}
+		return nil
+	},
+}
+
+var instanceStatusCmd = &cobra.Command{
+	Use:   "status <name-or-id>",
+	Short: "Refresh and show instance status",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireProject(); err != nil {
+			return err
+		}
+
+		stop := ui.Spinner("Finding instance")
+		inst, err := findInstance(args[0])
+		stop()
+		if err != nil {
+			return err
+		}
+
+		// Refresh status from AWS
+		stop = ui.Spinner("Refreshing status")
+		var refreshed instance
+		err = apiClient.Get(fmt.Sprintf("/projects/%s/cloud/instances/%s/status", cfg.ProjectID, inst.ID), &refreshed)
+		stop()
+
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("  Name:          %s\n", ui.Bold(refreshed.Name))
+		fmt.Printf("  State:         %s\n", stateColor(refreshed.InstanceState))
+		fmt.Printf("  Instance ID:   %s\n", refreshed.InstanceID)
+		fmt.Printf("  Type:          %s\n", refreshed.InstanceType)
+		fmt.Printf("  Region:        %s\n", refreshed.Region)
+		if refreshed.AvailabilityZone != "" {
+			fmt.Printf("  AZ:            %s\n", refreshed.AvailabilityZone)
+		}
+		if refreshed.PublicIP != "" {
+			fmt.Printf("  Public IP:     %s\n", refreshed.PublicIP)
+		}
+		if refreshed.PrivateIP != "" {
+			fmt.Printf("  Private IP:    %s\n", refreshed.PrivateIP)
+		}
+		if refreshed.ElasticIPAddress != "" {
+			fmt.Printf("  Elastic IP:    %s\n", ui.Cyan(refreshed.ElasticIPAddress))
+		}
+		if refreshed.DomainEnabled && refreshed.DomainName != "" {
+			fmt.Printf("  Domain:        %s\n", ui.Cyan(refreshed.DomainName))
+		}
+
+		return nil
+	},
+}
+
+// computeLocalKeyFingerprint computes the MD5 fingerprint of a public key file
+// using the same algorithm as the Toggle server (raw MD5 hex of decoded key data).
+func computeLocalKeyFingerprint(pubKeyPath string) (string, error) {
+	data, err := os.ReadFile(pubKeyPath)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 2 {
+		return "", fmt.Errorf("invalid public key format")
+	}
+	keyData, err := base64.StdEncoding.DecodeString(fields[1])
+	if err != nil {
+		return "", err
+	}
+	hash := md5.Sum(keyData)
+	return fmt.Sprintf("%x", hash), nil
+}
+
+// findMatchingLocalKey finds a local SSH private key that matches one of the project SSH keys.
+func findMatchingLocalKey(projectKeys []sshKey) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	sshDir := filepath.Join(home, ".ssh")
+
+	pubFiles, err := filepath.Glob(filepath.Join(sshDir, "*.pub"))
+	if err != nil {
+		return "", err
+	}
+
+	for _, pubFile := range pubFiles {
+		fp, err := computeLocalKeyFingerprint(pubFile)
+		if err != nil {
+			continue
+		}
+		for _, pk := range projectKeys {
+			if fp == pk.Fingerprint {
+				// Return the private key path (without .pub)
+				privKey := strings.TrimSuffix(pubFile, ".pub")
+				if _, err := os.Stat(privKey); err == nil {
+					return privKey, nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("no matching local SSH key found in %s", sshDir)
+}
+
+var instanceSSHCmd = &cobra.Command{
+	Use:   "ssh <name-or-id>",
+	Short: "SSH into an instance",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireProject(); err != nil {
+			return err
+		}
+
+		user, _ := cmd.Flags().GetString("user")
+
+		stop := ui.Spinner("Finding instance")
+		inst, err := findInstance(args[0])
+		stop()
+		if err != nil {
+			return err
+		}
+
+		addr := inst.effectiveAddress()
+		if addr == "" {
+			return fmt.Errorf("instance %q has no public address (state: %s)", inst.Name, inst.InstanceState)
+		}
+
+		// Find matching SSH key
+		var keys []sshKey
+		err = apiClient.Get(fmt.Sprintf("/projects/%s/cloud/ssh-keys", cfg.ProjectID), &keys)
+		if err != nil {
+			return fmt.Errorf("failed to fetch project SSH keys: %w", err)
+		}
+
+		sshArgs := []string{"ssh"}
+		keyPath, err := findMatchingLocalKey(keys)
+		if err != nil {
+			ui.Warn(fmt.Sprintf("Could not find matching SSH key: %v", err))
+			ui.Info("Trying without specifying a key file...")
+		} else {
+			ui.Info(fmt.Sprintf("Using key: %s", keyPath))
+			sshArgs = append(sshArgs, "-i", keyPath)
+		}
+
+		sshArgs = append(sshArgs, "-o", "StrictHostKeyChecking=no", fmt.Sprintf("%s@%s", user, addr))
+
+		// Find ssh binary
+		sshBin, err := findBinary("ssh")
+		if err != nil {
+			return fmt.Errorf("ssh not found in PATH: %w", err)
+		}
+
+		ui.Info(fmt.Sprintf("Connecting to %s@%s", user, addr))
+		return syscall.Exec(sshBin, sshArgs, os.Environ())
+	},
+}
+
+// findBinary locates a binary in PATH.
+func findBinary(name string) (string, error) {
+	pathEnv := os.Getenv("PATH")
+	for _, dir := range filepath.SplitList(pathEnv) {
+		full := filepath.Join(dir, name)
+		if _, err := os.Stat(full); err == nil {
+			return full, nil
+		}
+	}
+	return "", fmt.Errorf("%s not found in PATH", name)
+}
+
+func init() {
+	instanceProvisionCmd.Flags().StringP("name", "n", "", "Instance name")
+	instanceProvisionCmd.Flags().StringP("launch-config", "l", "", "Launch config ID or name")
+	instanceProvisionCmd.Flags().StringP("ssh-keys", "k", "", "Comma-separated SSH key names or IDs")
+	instanceProvisionCmd.Flags().StringP("instance-type", "t", "", "Override instance type")
+	instanceProvisionCmd.Flags().String("domain", "", "Domain subdomain (enables domain)")
+	instanceProvisionCmd.Flags().String("hosted-zone", "", "Route53 hosted zone ID (for domain)")
+	instanceProvisionCmd.Flags().Bool("no-wait", false, "Don't wait for instance to reach running state")
+
+	instanceTerminateCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
+	instanceSSHCmd.Flags().StringP("user", "u", "ubuntu", "SSH user")
+
+	instanceCmd.AddCommand(instanceListCmd)
+	instanceCmd.AddCommand(instanceProvisionCmd)
+	instanceCmd.AddCommand(instanceStartCmd)
+	instanceCmd.AddCommand(instanceStopCmd)
+	instanceCmd.AddCommand(instanceTerminateCmd)
+	instanceCmd.AddCommand(instanceStatusCmd)
+	instanceCmd.AddCommand(instanceSSHCmd)
+	rootCmd.AddCommand(instanceCmd)
+}
