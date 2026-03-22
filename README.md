@@ -5,20 +5,17 @@ CLI for provisioning and managing cloud instances via [Toggle](https://toggle.st
 ## Install
 
 ```bash
-# macOS (Apple Silicon)
-curl -sL https://github.com/smallest-inc/velocity-cli/releases/latest/download/vctl_darwin_arm64.tar.gz | tar xz
-sudo mv vctl /usr/local/bin/
+curl -sL https://raw.githubusercontent.com/smallest-inc/velocity-cli/main/install.sh | bash
+```
 
-# macOS (Intel)
-curl -sL https://github.com/smallest-inc/velocity-cli/releases/latest/download/vctl_darwin_amd64.tar.gz | tar xz
-sudo mv vctl /usr/local/bin/
+Or download a specific version:
 
-# Linux (x86_64)
-curl -sL https://github.com/smallest-inc/velocity-cli/releases/latest/download/vctl_linux_amd64.tar.gz | tar xz
-sudo mv vctl /usr/local/bin/
-
-# Linux (ARM64)
-curl -sL https://github.com/smallest-inc/velocity-cli/releases/latest/download/vctl_linux_arm64.tar.gz | tar xz
+```bash
+# Replace VERSION and pick your OS/ARCH
+VERSION=v0.1.0
+OS=darwin    # or linux
+ARCH=arm64   # or amd64
+curl -sL "https://github.com/smallest-inc/velocity-cli/releases/download/${VERSION}/vctl_${VERSION#v}_${OS}_${ARCH}.tar.gz" | tar xz
 sudo mv vctl /usr/local/bin/
 ```
 

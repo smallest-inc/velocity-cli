@@ -111,9 +111,11 @@ var upgradeCmd = &cobra.Command{
 }
 
 func findAsset(assets []githubAsset) *githubAsset {
-	target := fmt.Sprintf("vctl_%s_%s", runtime.GOOS, runtime.GOARCH)
+	// Match by OS and arch anywhere in the filename
+	// goreleaser names: vctl_0.1.0_darwin_amd64.tar.gz
+	osArch := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
 	for i := range assets {
-		if strings.Contains(assets[i].Name, target) && strings.HasSuffix(assets[i].Name, ".tar.gz") {
+		if strings.Contains(assets[i].Name, osArch) && strings.HasSuffix(assets[i].Name, ".tar.gz") {
 			return &assets[i]
 		}
 	}
