@@ -50,6 +50,13 @@ func Error(msg string)   { fmt.Fprintln(os.Stderr, Red("✗")+" "+msg) }
 func Warn(msg string)    { fmt.Println(Yellow("!") + " " + msg) }
 func Info(msg string)    { fmt.Println(Cyan("→") + " " + msg) }
 
+// Step prints a verbose step message (only when verbose is true).
+func Step(verbose bool, msg string) {
+	if verbose {
+		fmt.Println(Gray("  · " + msg))
+	}
+}
+
 func Table(headers []string, rows [][]string) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	headerLine := strings.Join(headers, "\t")
@@ -135,6 +142,12 @@ func MultiSelect(label string, options []string) ([]int, error) {
 }
 
 func Spinner(label string) func() {
+	// Non-interactive: print once, no animation
+	if !IsInteractive() {
+		fmt.Printf("%s...\n", label)
+		return func() {}
+	}
+
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)

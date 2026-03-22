@@ -19,6 +19,7 @@ var (
 	flagEndpoint string
 	flagToken    string
 	flagProject  string
+	Verbose      bool
 
 	version = "0.1.0"
 )
@@ -85,6 +86,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagEndpoint, "endpoint", "", "Toggle API endpoint (env: VCTL_ENDPOINT)")
 	rootCmd.PersistentFlags().StringVar(&flagToken, "token", "", "PAT token (env: VCTL_TOKEN)")
 	rootCmd.PersistentFlags().StringVar(&flagProject, "project", "", "Project ID (env: VCTL_PROJECT)")
+	rootCmd.PersistentFlags().BoolVarP(&Verbose, "verbose", "v", false, "Show detailed step-by-step output")
 	rootCmd.AddCommand(versionCmd)
 }
 

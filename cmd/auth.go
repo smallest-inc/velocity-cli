@@ -2,11 +2,15 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/smallest-inc/velocity-cli/internal/config"
 	"github.com/smallest-inc/velocity-cli/internal/ui"
 	"github.com/spf13/cobra"
 )
+
+func contains(s, substr string) bool { return strings.Contains(s, substr) }
 
 var authCmd = &cobra.Command{
 	Use:   "auth",
@@ -57,6 +61,25 @@ var authLoginCmd = &cobra.Command{
 				config.Save(cfg)
 				ui.Info(fmt.Sprintf("Auto-selected project: %s (%s)", projects[0].DisplayName, projects[0].Handle))
 			}
+		}
+
+		// Shell completion hint (show once)
+		completionHintFile := config.ConfigDir() + "/completion_hint_shown"
+		if _, err := os.Stat(completionHintFile); os.IsNotExist(err) {
+			fmt.Println()
+			ui.Info("Enable shell completion:")
+			shell := os.Getenv("SHELL")
+			switch {
+			case contains(shell, "zsh"):
+				fmt.Printf("  echo 'source <(vctl completion zsh)' >> ~/.zshrc\n")
+			case contains(shell, "bash"):
+				fmt.Printf("  echo 'source <(vctl completion bash)' >> ~/.bashrc\n")
+			case contains(shell, "fish"):
+				fmt.Printf("  vctl completion fish | source\n")
+			default:
+				fmt.Printf("  vctl completion --help\n")
+			}
+			os.WriteFile(completionHintFile, []byte("shown"), 0644)
 		}
 
 		return nil

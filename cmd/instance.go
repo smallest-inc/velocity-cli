@@ -208,6 +208,7 @@ Non-interactive mode (for scripting and agentic control):
 		}
 
 		// Fetch launch configs (needed for both modes)
+		ui.Step(Verbose, "Fetching launch configurations from Toggle")
 		var configs []launchConfig
 		stop := ui.Spinner("Fetching launch configurations")
 		err := apiClient.Get(fmt.Sprintf("/projects/%s/cloud/launch-configs", cfg.ProjectID), &configs)
@@ -220,6 +221,7 @@ Non-interactive mode (for scripting and agentic control):
 		}
 
 		// Fetch SSH keys (needed for both modes)
+		ui.Step(Verbose, "Fetching SSH keys from Toggle")
 		var keys []sshKey
 		stop = ui.Spinner("Fetching SSH keys")
 		err = apiClient.Get(fmt.Sprintf("/projects/%s/cloud/ssh-keys", cfg.ProjectID), &keys)
@@ -348,6 +350,7 @@ Non-interactive mode (for scripting and agentic control):
 		var autoKeySSHName string
 
 		if useAutoKeys {
+			ui.Step(Verbose, "Generating ed25519 keypair for auto SSH key management")
 			ui.Info("Generating ephemeral SSH keypair...")
 			pubKey, privPath, err := autokeys.GenerateKeyPair()
 			if err != nil {
@@ -406,6 +409,9 @@ Non-interactive mode (for scripting and agentic control):
 		}
 
 		// --- Provision ---
+		ui.Step(Verbose, "Calling Toggle API to launch EC2 instance")
+		ui.Step(Verbose, fmt.Sprintf("Launch config: %s (%s)", selectedConfig.Name, selectedConfig.ID))
+		ui.Step(Verbose, fmt.Sprintf("SSH keys: %d selected", len(selectedKeyIDs)))
 		stop = ui.Spinner("Provisioning instance")
 		var result struct {
 			Instance     instance `json:"instance"`
@@ -441,6 +447,7 @@ Non-interactive mode (for scripting and agentic control):
 		// Poll until running (unless --no-wait)
 		if !noWaitFlag && result.Instance.InstanceState != "running" {
 			fmt.Println()
+			ui.Step(Verbose, "Instance launched, waiting for running state (EIP association + boot)")
 			stop = ui.Spinner("Waiting for instance to start")
 			inst, err := pollInstanceStatus(result.Instance.ID, "running", 5*time.Minute)
 			stop()
@@ -696,15 +703,23 @@ func findMatchingLocalKey(projectKeys []sshKey) (string, error) {
 }
 
 var instanceSSHCmd = &cobra.Command{
-	Use:   "ssh <name-or-id>",
+	Use:   "ssh <name-or-id> [-- extra-ssh-args...]",
 	Short: "SSH into an instance",
-	Args:  cobra.ExactArgs(1),
+	Long: `SSH into an instance. Extra arguments after -- are passed to ssh.
+
+Examples:
+  vctl instance ssh mybox
+  vctl instance ssh mybox -- -L 8080:localhost:8080
+  vctl instance ssh mybox -- -N -D 1080`,
+	Args:                  cobra.MinimumNArgs(1),
+	DisableFlagsInUseLine: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := requireProject(); err != nil {
 			return err
 		}
 
 		user, _ := cmd.Flags().GetString("user")
+		extraSSHArgs := args[1:] // everything after the instance name
 
 		stop := ui.Spinner("Finding instance")
 		inst, err := findInstance(args[0])
@@ -725,7 +740,8 @@ var instanceSSHCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			sshArgs := []string{"ssh", "-o", "StrictHostKeyChecking=no", "-i", keyPath, user + "@" + addr}
+			sshArgs := append([]string{"ssh", "-o", "StrictHostKeyChecking=no", "-i", keyPath}, extraSSHArgs...)
+			sshArgs = append(sshArgs, user+"@"+addr)
 			return syscall.Exec(sshBin, sshArgs, os.Environ())
 		}
 
@@ -746,7 +762,9 @@ var instanceSSHCmd = &cobra.Command{
 			sshArgs = append(sshArgs, "-i", keyPath)
 		}
 
-		sshArgs = append(sshArgs, "-o", "StrictHostKeyChecking=no", fmt.Sprintf("%s@%s", user, addr))
+		sshArgs = append(sshArgs, "-o", "StrictHostKeyChecking=no")
+		sshArgs = append(sshArgs, extraSSHArgs...)
+		sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, addr))
 
 		// Find ssh binary
 		sshBin, err := findBinary("ssh")
