@@ -6,6 +6,8 @@ import (
 
 	"github.com/smallest-inc/velocity-cli/internal/api"
 	"github.com/smallest-inc/velocity-cli/internal/config"
+	"github.com/smallest-inc/velocity-cli/internal/update"
+	"github.com/smallest-inc/velocity-cli/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -69,6 +71,22 @@ var rootCmd = &cobra.Command{
 
 		apiClient = api.NewClient(cfg.Endpoint, creds.Token)
 		return nil
+	},
+	PersistentPostRun: func(cmd *cobra.Command, args []string) {
+		// Skip for upgrade/version/completion
+		switch cmd.Name() {
+		case "upgrade", "version", "completion":
+			return
+		}
+
+		// Show cached update notification (local file read, zero latency)
+		if msg := update.Notify(version); msg != "" {
+			fmt.Println()
+			ui.Info(msg)
+		}
+
+		// Kick off background check for next time (non-blocking)
+		update.CheckInBackground(version)
 	},
 	SilenceUsage:  true,
 	SilenceErrors: true,
