@@ -26,6 +26,8 @@ checksum:
 
 changelog:
   sort: asc
+  use: github
+  abbrev: 7
 
 release:
   github:
