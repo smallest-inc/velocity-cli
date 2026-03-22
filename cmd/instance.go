@@ -88,7 +88,8 @@ func stateColor(state string) string {
 	}
 }
 
-// findInstance finds an instance by name or ID.
+// findInstance finds an instance by name, Toggle ID, or AWS instance ID.
+// If multiple instances match a name, returns an error asking for the ID.
 func findInstance(nameOrID string) (*instance, error) {
 	var instances []instance
 	err := apiClient.Get(fmt.Sprintf("/projects/%s/cloud/instances", cfg.ProjectID), &instances)
@@ -96,10 +97,29 @@ func findInstance(nameOrID string) (*instance, error) {
 		return nil, err
 	}
 
+	// Exact ID match first (always unique)
 	for i := range instances {
-		if instances[i].Name == nameOrID || instances[i].ID == nameOrID || instances[i].InstanceID == nameOrID {
+		if instances[i].ID == nameOrID || instances[i].InstanceID == nameOrID {
 			return &instances[i], nil
 		}
+	}
+
+	// Name match — check for ambiguity
+	var matches []*instance
+	for i := range instances {
+		if instances[i].Name == nameOrID {
+			matches = append(matches, &instances[i])
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		msg := fmt.Sprintf("multiple instances named %q — use the instance ID instead:\n", nameOrID)
+		for _, m := range matches {
+			msg += fmt.Sprintf("  %s (%s, %s)\n", m.ID, m.InstanceID, m.InstanceState)
+		}
+		return nil, fmt.Errorf(msg)
 	}
 	return nil, fmt.Errorf("instance %q not found", nameOrID)
 }
@@ -323,24 +343,32 @@ Non-interactive mode (for scripting and agentic control):
 			}
 		}
 
+		var autoKeyPrivPath string
+		var autoKeySSHID string
+		var autoKeySSHName string
+
 		if useAutoKeys {
 			ui.Info("Generating ephemeral SSH keypair...")
-			pubKey, privPath, err := autokeys.GenerateKeyPair(name)
+			pubKey, privPath, err := autokeys.GenerateKeyPair()
 			if err != nil {
 				return fmt.Errorf("failed to generate SSH key: %w", err)
 			}
+			autoKeyPrivPath = privPath
+			autoKeySSHName = filepath.Base(privPath)
 
 			// Upload to Toggle
 			var uploaded sshKey
 			uploadReq := map[string]string{
-				"name":       "vctl-" + name,
+				"name":       autoKeySSHName,
 				"public_key": pubKey,
 			}
 			if err := apiClient.Post(fmt.Sprintf("/projects/%s/cloud/ssh-keys", cfg.ProjectID), uploadReq, &uploaded); err != nil {
-				autokeys.RemoveKeyForInstance(name)
+				os.Remove(privPath)
+				os.Remove(privPath + ".pub")
 				return fmt.Errorf("failed to upload SSH key: %w", err)
 			}
 
+			autoKeySSHID = uploaded.ID
 			selectedKeyIDs = append(selectedKeyIDs, uploaded.ID)
 			ui.Success(fmt.Sprintf("SSH key generated and uploaded (private key: %s)", privPath))
 		}
@@ -388,6 +416,11 @@ Non-interactive mode (for scripting and agentic control):
 		stop()
 		if err != nil {
 			return err
+		}
+
+		// Register auto-key mapping now that we have the instance ID
+		if useAutoKeys && autoKeyPrivPath != "" {
+			autokeys.Register(result.Instance.ID, autoKeyPrivPath, autoKeySSHID, autoKeySSHName)
 		}
 
 		ui.Success(fmt.Sprintf("Instance %q provisioned", result.Instance.Name))
@@ -550,19 +583,10 @@ var instanceTerminateCmd = &cobra.Command{
 			ui.Warn(w)
 		}
 
-		// Clean up auto-generated SSH key
-		if _, ok := autokeys.FindKeyForInstance(inst.Name); ok {
-			// Delete from Toggle
-			var projectKeys []sshKey
-			if err := apiClient.Get(fmt.Sprintf("/projects/%s/cloud/ssh-keys", cfg.ProjectID), &projectKeys); err == nil {
-				for _, k := range projectKeys {
-					if k.Name == "vctl-"+inst.Name {
-						apiClient.Delete(fmt.Sprintf("/projects/%s/cloud/ssh-keys/%s", cfg.ProjectID, k.ID), nil)
-						break
-					}
-				}
-			}
-			autokeys.RemoveKeyForInstance(inst.Name)
+		// Clean up auto-generated SSH key (by instance ID, not name)
+		if sshKeyID, ok := autokeys.GetSSHKeyID(inst.ID); ok {
+			apiClient.Delete(fmt.Sprintf("/projects/%s/cloud/ssh-keys/%s", cfg.ProjectID, sshKeyID), nil)
+			autokeys.RemoveKeyForInstance(inst.ID)
 			ui.Info("Auto-managed SSH key cleaned up")
 		}
 
@@ -694,8 +718,8 @@ var instanceSSHCmd = &cobra.Command{
 			return fmt.Errorf("instance %q has no public address (state: %s)", inst.Name, inst.InstanceState)
 		}
 
-		// Find SSH key: check vctl auto-managed keys first, then ~/.ssh/
-		if keyPath, ok := autokeys.FindKeyForInstance(inst.Name); ok {
+		// Find SSH key: check vctl auto-managed keys first (by instance ID), then ~/.ssh/
+		if keyPath, ok := autokeys.FindKeyForInstance(inst.ID); ok {
 			ui.Info(fmt.Sprintf("Using auto-managed key: %s", keyPath))
 			sshBin, err := findBinary("ssh")
 			if err != nil {
