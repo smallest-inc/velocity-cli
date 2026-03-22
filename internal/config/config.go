@@ -15,8 +15,10 @@ const (
 
 // Config stores user preferences.
 type Config struct {
-	Endpoint  string `yaml:"endpoint"`
-	ProjectID string `yaml:"project_id"`
+	Endpoint           string `yaml:"endpoint"`
+	ProjectID          string `yaml:"project_id"`
+	ProjectHandle      string `yaml:"project_handle,omitempty"`
+	ProjectDisplayName string `yaml:"project_display_name,omitempty"`
 }
 
 // Credentials stores authentication tokens.

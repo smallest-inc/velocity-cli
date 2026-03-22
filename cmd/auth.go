@@ -58,6 +58,8 @@ var authLoginCmd = &cobra.Command{
 			// Auto-set project if only one exists and none is configured
 			if len(projects) == 1 && cfg.ProjectID == "" {
 				cfg.ProjectID = projects[0].ID
+				cfg.ProjectHandle = projects[0].Handle
+				cfg.ProjectDisplayName = projects[0].DisplayName
 				config.Save(cfg)
 				ui.Info(fmt.Sprintf("Auto-selected project: %s (%s)", projects[0].DisplayName, projects[0].Handle))
 			}
@@ -90,24 +92,33 @@ var authStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show current authentication status",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Printf("Endpoint:  %s\n", ui.Cyan(cfg.Endpoint))
+		fmt.Printf("  Endpoint:  %s\n", ui.Cyan(cfg.Endpoint))
 
 		if creds.Token == "" {
-			fmt.Printf("Token:     %s\n", ui.Red("not set"))
+			fmt.Printf("  Token:     %s\n", ui.Red("not set"))
 		} else {
 			prefix := creds.Token
-			if len(prefix) > 12 {
-				prefix = prefix[:12] + "..."
+			if len(prefix) > 22 {
+				prefix = prefix[:22] + "..."
 			}
-			fmt.Printf("Token:     %s\n", ui.Green(prefix))
+			fmt.Printf("  Token:     %s\n", ui.Green(prefix))
 		}
 
 		if cfg.ProjectID == "" {
-			fmt.Printf("Project:   %s\n", ui.Yellow("not set"))
+			fmt.Printf("  Project:   %s\n", ui.Yellow("not set"))
 		} else {
-			fmt.Printf("Project:   %s\n", ui.Green(cfg.ProjectID))
+			projectLabel := cfg.ProjectID
+			if cfg.ProjectDisplayName != "" {
+				projectLabel = fmt.Sprintf("%s (%s) [%s]", cfg.ProjectDisplayName, cfg.ProjectHandle, cfg.ProjectID)
+			}
+			fmt.Printf("  Project:   %s\n", ui.Green(projectLabel))
 		}
 
+		// TODO: Add user info (name, email, ID) once Toggle has a /me or
+		// /whoami endpoint that resolves the PAT to user identity without
+		// requiring the full user list.
+
+		fmt.Printf("  Config:    %s\n", ui.Gray(config.ConfigDir()))
 		return nil
 	},
 }

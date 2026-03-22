@@ -89,6 +89,8 @@ var projectUseCmd = &cobra.Command{
 		}
 
 		cfg.ProjectID = found.ID
+		cfg.ProjectHandle = found.Handle
+		cfg.ProjectDisplayName = found.DisplayName
 		if err := config.Save(cfg); err != nil {
 			return fmt.Errorf("failed to save config: %w", err)
 		}
