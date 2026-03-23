@@ -51,6 +51,23 @@ var authLoginCmd = &cobra.Command{
 			return fmt.Errorf("failed to save credentials: %w", err)
 		}
 
+		// Always persist current endpoint and project to config on login
+		if flagEndpoint != "" {
+			cfg.Endpoint = flagEndpoint
+		}
+		if flagProject != "" {
+			// Resolve handle/display name from fetched projects
+			for _, p := range projects {
+				if p.ID == flagProject || p.Handle == flagProject {
+					cfg.ProjectID = p.ID
+					cfg.ProjectHandle = p.Handle
+					cfg.ProjectDisplayName = p.DisplayName
+					break
+				}
+			}
+		}
+		config.Save(cfg)
+
 		ui.Success("Authenticated successfully")
 		if len(projects) > 0 {
 			ui.Info(fmt.Sprintf("Found %d project(s). Use 'vctl project list' to see them.", len(projects)))
