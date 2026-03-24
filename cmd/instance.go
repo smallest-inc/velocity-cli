@@ -47,6 +47,7 @@ type launchConfig struct {
 	AMI                   string  `json:"ami"`
 	EBSVolumeGB           int     `json:"ebs_volume_gb"`
 	IsDefault             bool    `json:"is_default"`
+	DefaultHostedZoneID   string  `json:"default_hosted_zone_id"`
 }
 
 type sshKey struct {
@@ -408,13 +409,13 @@ Non-interactive mode (for scripting and agentic control):
 			}
 			var zones []hostedZone
 
+			// Default zone from the selected launch config
+			defaultZoneID := selectedConfig.DefaultHostedZoneID
+
 			var providers []struct {
-				ID                  string `json:"id"`
-				DefaultHostedZoneID string `json:"default_hosted_zone_id"`
+				ID string `json:"id"`
 			}
-			defaultZoneID := ""
 			if err := apiClient.Get("/cloud/providers", &providers); err == nil && len(providers) > 0 {
-				defaultZoneID = providers[0].DefaultHostedZoneID
 				apiClient.Get(fmt.Sprintf("/cloud/providers/%s/dns/hosted-zones", providers[0].ID), &zones)
 			}
 
