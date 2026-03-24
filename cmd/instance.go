@@ -396,49 +396,76 @@ Non-interactive mode (for scripting and agentic control):
 			reqBody["overrides"] = overrides
 		}
 
-		// Domain
-		if domainFlag != "" {
-			domain := map[string]interface{}{
-				"enabled":   true,
-				"subdomain": domainFlag,
+		// Domain — enabled by default, use --no-domain to opt out
+		noDomainFlag, _ := cmd.Flags().GetBool("no-domain")
+
+		if !noDomainFlag {
+			// Resolve hosted zone
+			type hostedZone struct {
+				ID          string `json:"ID"`
+				Name        string `json:"Name"`
+				RecordCount int64  `json:"RecordCount"`
 			}
-			if zoneFlag != "" {
-				domain["hosted_zone_id"] = zoneFlag
+			var zones []hostedZone
+
+			var providers []struct {
+				ID                  string `json:"id"`
+				DefaultHostedZoneID string `json:"default_hosted_zone_id"`
 			}
-			reqBody["domain"] = domain
-		} else if interactive {
-			if ui.Confirm("Enable domain name") {
-				subdomain := ui.Prompt("Subdomain (enter to auto-generate)")
-				if subdomain == "" {
-					subdomain = name // default to instance name
-				}
-				// Fetch hosted zones
-				var providers []struct {
-					ID string `json:"id"`
-				}
-				apiClient.Get("/cloud/providers", &providers)
-				if len(providers) > 0 {
-					var zones []struct {
-						ID          string `json:"ID"`
-						Name        string `json:"Name"`
-						RecordCount int64  `json:"RecordCount"`
+			defaultZoneID := ""
+			if err := apiClient.Get("/cloud/providers", &providers); err == nil && len(providers) > 0 {
+				defaultZoneID = providers[0].DefaultHostedZoneID
+				apiClient.Get(fmt.Sprintf("/cloud/providers/%s/dns/hosted-zones", providers[0].ID), &zones)
+			}
+
+			if len(zones) > 0 {
+				subdomain := domainFlag
+				selectedZoneID := zoneFlag
+
+				if interactive {
+					// Prompt for subdomain
+					subdomain = ui.Prompt(fmt.Sprintf("Subdomain (enter for '%s')", name))
+					if subdomain == "" {
+						subdomain = name
 					}
-					apiClient.Get(fmt.Sprintf("/cloud/providers/%s/dns/hosted-zones", providers[0].ID), &zones)
-					if len(zones) > 0 {
-						zoneNames := make([]string, len(zones))
-						for i, z := range zones {
-							zoneNames[i] = fmt.Sprintf("%s (%d records)", z.Name, z.RecordCount)
-						}
-						zoneIdx, err := ui.Select("Select hosted zone", zoneNames)
-						if err == nil {
-							reqBody["domain"] = map[string]interface{}{
-								"enabled":        true,
-								"subdomain":      subdomain,
-								"hosted_zone_id": zones[zoneIdx].ID,
+
+					// Prompt for zone if multiple
+					if selectedZoneID == "" {
+						if len(zones) == 1 {
+							selectedZoneID = zones[0].ID
+							ui.Info(fmt.Sprintf("Using hosted zone: %s", zones[0].Name))
+						} else {
+							zoneNames := make([]string, len(zones))
+							for i, z := range zones {
+								zoneNames[i] = fmt.Sprintf("%s (%d records)", z.Name, z.RecordCount)
+							}
+							zoneIdx, err := ui.Select("Select hosted zone", zoneNames)
+							if err == nil {
+								selectedZoneID = zones[zoneIdx].ID
 							}
 						}
 					}
+				} else {
+					// Non-interactive: only auto-provision if default zone is set
+					if subdomain == "" {
+						subdomain = name
+					}
+					if selectedZoneID == "" && defaultZoneID != "" {
+						selectedZoneID = defaultZoneID
+					}
+					// No default zone and no flag → skip domain silently
 				}
+
+				if selectedZoneID != "" {
+					reqBody["domain"] = map[string]interface{}{
+						"enabled":        true,
+						"subdomain":      subdomain,
+						"hosted_zone_id": selectedZoneID,
+					}
+					ui.Step(Verbose, fmt.Sprintf("Domain: %s (zone: %s)", subdomain, selectedZoneID))
+				}
+			} else {
+				ui.Step(Verbose, "No hosted zones found, skipping domain")
 			}
 		}
 
@@ -828,8 +855,9 @@ func init() {
 	instanceProvisionCmd.Flags().StringP("launch-config", "l", "", "Launch config ID or name")
 	instanceProvisionCmd.Flags().StringP("ssh-keys", "k", "", "Comma-separated SSH key names or IDs")
 	instanceProvisionCmd.Flags().StringP("instance-type", "t", "", "Override instance type")
-	instanceProvisionCmd.Flags().String("domain", "", "Domain subdomain (enables domain)")
-	instanceProvisionCmd.Flags().String("hosted-zone", "", "Route53 hosted zone ID (for domain)")
+	instanceProvisionCmd.Flags().String("domain", "", "Domain subdomain (default: instance name)")
+	instanceProvisionCmd.Flags().String("hosted-zone", "", "Route53 hosted zone ID (default: first available)")
+	instanceProvisionCmd.Flags().Bool("no-domain", false, "Skip domain provisioning")
 	instanceProvisionCmd.Flags().Bool("auto-keys", false, "Auto-generate and manage SSH keypair (implied when --ssh-keys not provided)")
 	instanceProvisionCmd.Flags().Bool("no-wait", false, "Don't wait for instance to reach running state")
 
