@@ -406,6 +406,40 @@ Non-interactive mode (for scripting and agentic control):
 				domain["hosted_zone_id"] = zoneFlag
 			}
 			reqBody["domain"] = domain
+		} else if interactive {
+			if ui.Confirm("Enable domain name") {
+				subdomain := ui.Prompt("Subdomain (enter to auto-generate)")
+				if subdomain == "" {
+					subdomain = name // default to instance name
+				}
+				// Fetch hosted zones
+				var providers []struct {
+					ID string `json:"id"`
+				}
+				apiClient.Get("/cloud/providers", &providers)
+				if len(providers) > 0 {
+					var zones []struct {
+						ID          string `json:"ID"`
+						Name        string `json:"Name"`
+						RecordCount int64  `json:"RecordCount"`
+					}
+					apiClient.Get(fmt.Sprintf("/cloud/providers/%s/dns/hosted-zones", providers[0].ID), &zones)
+					if len(zones) > 0 {
+						zoneNames := make([]string, len(zones))
+						for i, z := range zones {
+							zoneNames[i] = fmt.Sprintf("%s (%d records)", z.Name, z.RecordCount)
+						}
+						zoneIdx, err := ui.Select("Select hosted zone", zoneNames)
+						if err == nil {
+							reqBody["domain"] = map[string]interface{}{
+								"enabled":        true,
+								"subdomain":      subdomain,
+								"hosted_zone_id": zones[zoneIdx].ID,
+							}
+						}
+					}
+				}
+			}
 		}
 
 		// --- Provision ---
@@ -461,7 +495,7 @@ Non-interactive mode (for scripting and agentic control):
 
 		if addr != "" {
 			fmt.Println()
-			ui.Info(fmt.Sprintf("Connect with: ssh ubuntu@%s", addr))
+			ui.Info(fmt.Sprintf("Connect with: vctl instance ssh %s", name))
 		}
 
 		return nil
