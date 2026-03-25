@@ -19,6 +19,8 @@ type Config struct {
 	ProjectID          string `yaml:"project_id"`
 	ProjectHandle      string `yaml:"project_handle,omitempty"`
 	ProjectDisplayName string `yaml:"project_display_name,omitempty"`
+	InstanceID         string `yaml:"instance_id,omitempty"`
+	InstanceName       string `yaml:"instance_name,omitempty"`
 }
 
 // Credentials stores authentication tokens.

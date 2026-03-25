@@ -11,6 +11,7 @@ import (
 	"time"
 
 	autokeys "github.com/smallest-inc/velocity-cli/internal/keys"
+	"github.com/smallest-inc/velocity-cli/internal/config"
 	"github.com/smallest-inc/velocity-cli/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -851,6 +852,34 @@ func findBinary(name string) (string, error) {
 	return "", fmt.Errorf("%s not found in PATH", name)
 }
 
+var instanceUseCmd = &cobra.Command{
+	Use:   "use <name-or-id>",
+	Short: "Set the default instance",
+	Long:  "Set the default instance used by service commands.",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireProject(); err != nil {
+			return err
+		}
+
+		stop := ui.Spinner("Resolving instance")
+		inst, err := findInstance(args[0])
+		stop()
+		if err != nil {
+			return err
+		}
+
+		cfg.InstanceID = inst.ID
+		cfg.InstanceName = inst.Name
+		if err := config.Save(cfg); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
+
+		ui.Success(fmt.Sprintf("Default instance set to %s (%s)", ui.Bold(inst.Name), inst.ID))
+		return nil
+	},
+}
+
 func init() {
 	instanceProvisionCmd.Flags().StringP("name", "n", "", "Instance name")
 	instanceProvisionCmd.Flags().StringP("launch-config", "l", "", "Launch config ID or name")
@@ -872,5 +901,6 @@ func init() {
 	instanceCmd.AddCommand(instanceTerminateCmd)
 	instanceCmd.AddCommand(instanceStatusCmd)
 	instanceCmd.AddCommand(instanceSSHCmd)
+	instanceCmd.AddCommand(instanceUseCmd)
 	rootCmd.AddCommand(instanceCmd)
 }
