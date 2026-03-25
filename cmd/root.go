@@ -21,6 +21,7 @@ var (
 	flagEndpoint string
 	flagToken    string
 	flagProject  string
+	Quiet        bool
 	Verbose      bool
 
 	version = "0.1.0"
@@ -31,6 +32,9 @@ var rootCmd = &cobra.Command{
 	Short: "Velocity CLI — manage cloud instances via the Toggle API",
 	Long:  "vctl is a command-line tool for provisioning and managing cloud instances through the Toggle platform.",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Compute Verbose from Quiet flag
+		Verbose = !Quiet
+
 		// Skip loading config for commands that don't need it
 		if cmd.Name() == "version" {
 			return nil
@@ -104,7 +108,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagEndpoint, "endpoint", "", "Toggle API endpoint (env: VCTL_ENDPOINT)")
 	rootCmd.PersistentFlags().StringVar(&flagToken, "token", "", "PAT token (env: VCTL_TOKEN)")
 	rootCmd.PersistentFlags().StringVar(&flagProject, "project", "", "Project ID (env: VCTL_PROJECT)")
-	rootCmd.PersistentFlags().BoolVarP(&Verbose, "verbose", "v", false, "Show detailed step-by-step output")
+	rootCmd.PersistentFlags().BoolVarP(&Quiet, "quiet", "q", false, "Suppress detailed output")
 	rootCmd.AddCommand(versionCmd)
 }
 

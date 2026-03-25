@@ -25,6 +25,7 @@ type serviceContext struct {
 	user    string
 	addr    string
 	logPath string
+	pidPath string
 }
 
 // resolveService loads velocity.yml, resolves the target instance, and finds an SSH key.
@@ -89,6 +90,7 @@ func resolveService(cmd *cobra.Command) (*serviceContext, error) {
 		projectName = "velocity"
 	}
 	logPath := fmt.Sprintf("/tmp/velocity-%s.log", projectName)
+	pidPath := fmt.Sprintf("/tmp/velocity-%s.pid", projectName)
 
 	ui.Info(fmt.Sprintf("Instance: %s (%s)", ui.Bold(inst.Name), addr))
 	ui.Step(Verbose, fmt.Sprintf("SSH key: %s", keyPath))
@@ -102,6 +104,7 @@ func resolveService(cmd *cobra.Command) (*serviceContext, error) {
 		user:    user,
 		addr:    addr,
 		logPath: logPath,
+		pidPath: pidPath,
 	}, nil
 }
 
@@ -415,9 +418,10 @@ var serviceUpCmd = &cobra.Command{
 				// Background mode: nohup + log file
 				ui.Info(fmt.Sprintf("Starting services (detached): %s", ctx.spec.Lifecycle.Start))
 				// Use setsid to fully detach the process from the SSH session
+				// Save the PID to a file so `down` can kill the entire process group
 				startCmd := fmt.Sprintf(
-					"%scd %s && setsid bash -c '%s' > %s 2>&1 < /dev/null & echo $!",
-					envPrefix, remotePath, ctx.spec.Lifecycle.Start, ctx.logPath,
+					"%scd %s && (setsid bash -c '%s' > %s 2>&1 < /dev/null & PID=$!; echo $PID > %s; echo $PID) 2>/dev/null",
+					envPrefix, remotePath, ctx.spec.Lifecycle.Start, ctx.logPath, ctx.pidPath,
 				)
 				out, err := remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, startCmd)
 				if err != nil {
@@ -502,10 +506,21 @@ var serviceDownCmd = &cobra.Command{
 			}
 		}
 
-		// Fallback: kill processes matching lifecycle.start
-		if ctx.spec.Lifecycle.Start != "" {
-			killCmd := fmt.Sprintf("pkill -f '%s' 2>/dev/null; true", ctx.spec.Lifecycle.Start)
-			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, killCmd)
+		// Kill all service processes: PID group + port-based fuser as reliable cleanup
+		if ctx.pidPath != "" {
+			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr,
+				fmt.Sprintf("if [ -f %s ]; then PID=$(cat %s); kill -9 -- -$PID 2>/dev/null; rm -f %s; fi; true",
+					ctx.pidPath, ctx.pidPath, ctx.pidPath))
+		}
+		// fuser -k on all declared service ports — most reliable way to ensure clean shutdown
+		var fuserCmds []string
+		for _, svc := range ctx.spec.Services {
+			if svc.Port > 0 {
+				fuserCmds = append(fuserCmds, fmt.Sprintf("fuser -k -9 %d/tcp 2>/dev/null", svc.Port))
+			}
+		}
+		if len(fuserCmds) > 0 {
+			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, strings.Join(fuserCmds, "; ")+"; true")
 		}
 
 		// Stop Docker dependencies if --all
@@ -550,8 +565,19 @@ var serviceResetCmd = &cobra.Command{
 		if ctx.spec.Lifecycle.Stop != "" {
 			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, fmt.Sprintf("cd %s && %s 2>/dev/null; true", remotePath, ctx.spec.Lifecycle.Stop))
 		}
-		if ctx.spec.Lifecycle.Start != "" {
-			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, fmt.Sprintf("pkill -f '%s' 2>/dev/null; true", ctx.spec.Lifecycle.Start))
+		if ctx.pidPath != "" {
+			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr,
+				fmt.Sprintf("if [ -f %s ]; then PID=$(cat %s); kill -9 -- -$PID 2>/dev/null; rm -f %s; fi; true",
+					ctx.pidPath, ctx.pidPath, ctx.pidPath))
+		}
+		var resetFuserCmds []string
+		for _, svc := range ctx.spec.Services {
+			if svc.Port > 0 {
+				resetFuserCmds = append(resetFuserCmds, fmt.Sprintf("fuser -k -9 %d/tcp 2>/dev/null", svc.Port))
+			}
+		}
+		if len(resetFuserCmds) > 0 {
+			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, strings.Join(resetFuserCmds, "; ")+"; true")
 		}
 		ui.Success("Dev process stopped")
 

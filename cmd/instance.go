@@ -49,6 +49,7 @@ type launchConfig struct {
 	EBSVolumeGB           int     `json:"ebs_volume_gb"`
 	IsDefault             bool    `json:"is_default"`
 	DefaultHostedZoneID   string  `json:"default_hosted_zone_id"`
+	DomainPrefix          string  `json:"domain_prefix"`
 }
 
 type sshKey struct {
@@ -121,7 +122,7 @@ func findInstance(nameOrID string) (*instance, error) {
 		for _, m := range matches {
 			msg += fmt.Sprintf("  %s (%s, %s)\n", m.ID, m.InstanceID, m.InstanceState)
 		}
-		return nil, fmt.Errorf(msg)
+		return nil, fmt.Errorf("%s", msg)
 	}
 	return nil, fmt.Errorf("instance %q not found", nameOrID)
 }
