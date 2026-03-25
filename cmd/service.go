@@ -229,13 +229,47 @@ var serviceUpCmd = &cobra.Command{
 					continue
 				}
 
-				// Replace all http://localhost:PORT → https://domain
+				// Replace http://localhost:PORT → https://domain only for declared env var prefixes
 				localhostRe := regexp.MustCompile(`http://localhost:\d+`)
-				modified := localhostRe.ReplaceAllString(envContent, domain)
+				rewritePrefixes := ctx.spec.Sync.EnvRewriteVars
+				var modifiedLines []string
+				for _, line := range strings.Split(envContent, "\n") {
+					if len(rewritePrefixes) > 0 {
+						for _, prefix := range rewritePrefixes {
+							if strings.HasPrefix(line, prefix) {
+								line = localhostRe.ReplaceAllString(line, domain)
+								break
+							}
+						}
+					} else {
+						// No prefixes defined — rewrite all (backward compat)
+						line = localhostRe.ReplaceAllString(line, domain)
+					}
+					modifiedLines = append(modifiedLines, line)
+				}
+				modified := strings.Join(modifiedLines, "\n")
 
 				// Apply env_transforms from velocity.yml
 				for _, t := range ctx.spec.Sync.EnvTransforms {
-					re, err := regexp.Compile(t.Match)
+					// Skip if scoped to specific services and this isn't one
+					if len(t.Services) > 0 {
+						scoped := false
+						for _, s := range t.Services {
+							if s == svcName {
+								scoped = true
+								break
+							}
+						}
+						if !scoped {
+							continue
+						}
+					}
+					// Enable multiline mode so ^ and $ match line boundaries
+					pattern := t.Match
+					if !strings.HasPrefix(pattern, "(?m)") {
+						pattern = "(?m)" + pattern
+					}
+					re, err := regexp.Compile(pattern)
 					if err != nil {
 						ui.Warn(fmt.Sprintf("Invalid env_transform pattern %q: %v", t.Match, err))
 						continue

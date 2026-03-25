@@ -76,16 +76,19 @@ type Lifecycle struct {
 
 // SyncConfig controls rsync behavior.
 type SyncConfig struct {
-	Exclude       []string       `yaml:"exclude"`
-	IncludeHidden []string       `yaml:"include_hidden"`
-	EnvTransforms []EnvTransform `yaml:"env_transforms"`
+	Exclude          []string       `yaml:"exclude"`
+	IncludeHidden    []string       `yaml:"include_hidden"`
+	EnvTransforms    []EnvTransform `yaml:"env_transforms"`
+	EnvRewriteVars   []string       `yaml:"env_rewrite_vars"`   // var prefixes for localhost→domain rewrite (e.g. NEXT_PUBLIC_, ORIGIN)
 }
 
 // EnvTransform describes a regex replacement applied to .env files on the remote.
 // Supports {{.Remote.User}} and {{.Remote.Path}} template variables in Replace.
+// If Services is set, the transform only applies to those services.
 type EnvTransform struct {
-	Match   string `yaml:"match"`
-	Replace string `yaml:"replace"`
+	Match    string   `yaml:"match"`
+	Replace  string   `yaml:"replace"`
+	Services []string `yaml:"services,omitempty"`
 }
 
 // Dependencies lists external dependencies.
