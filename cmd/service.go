@@ -232,15 +232,28 @@ var serviceUpCmd = &cobra.Command{
 				// Replace all http://localhost:PORT → https://domain
 				localhostRe := regexp.MustCompile(`http://localhost:\d+`)
 				modified := localhostRe.ReplaceAllString(envContent, domain)
-				changed := modified != envContent
 
+				// Apply env_transforms from velocity.yml
+				for _, t := range ctx.spec.Sync.EnvTransforms {
+					re, err := regexp.Compile(t.Match)
+					if err != nil {
+						ui.Warn(fmt.Sprintf("Invalid env_transform pattern %q: %v", t.Match, err))
+						continue
+					}
+					// Expand template variables in replacement
+					repl := t.Replace
+					repl = strings.ReplaceAll(repl, "{{.Remote.User}}", ctx.user)
+					repl = strings.ReplaceAll(repl, "{{.Remote.Path}}", remotePath)
+					modified = re.ReplaceAllString(modified, repl)
+				}
+
+				changed := modified != envContent
 				if !changed {
 					continue
 				}
 
-				// Write as .env.local (Next.js .env.local overrides .env)
-				envLocalPath := fmt.Sprintf("%s/%s/.env.local", remotePath, svcPath)
-				writeCmd := fmt.Sprintf("cat > %s << 'ENVEOF'\n%s\nENVEOF", envLocalPath, modified)
+				// Overwrite .env in-place on remote (sync restores it from local next time)
+				writeCmd := fmt.Sprintf("cat > %s << 'ENVEOF'\n%s\nENVEOF", envPath, modified)
 				if _, err := remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, writeCmd); err != nil {
 					ui.Warn(fmt.Sprintf("Failed to write .env.local for %s: %v", svcName, err))
 				} else {
