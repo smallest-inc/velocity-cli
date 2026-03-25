@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -112,6 +113,68 @@ var serviceCmd = &cobra.Command{
 	Long:  "Commands for syncing, starting, stopping, and managing services defined in velocity.yml.",
 }
 
+// runSync rsyncs the current working directory to the remote instance.
+func runSync(ctx *serviceContext) error {
+	remotePath := ctx.spec.Remote.Path
+	if remotePath == "" {
+		return fmt.Errorf("remote.path is not set in velocity.yml")
+	}
+
+	// Ensure remote path ends with /
+	if !strings.HasSuffix(remotePath, "/") {
+		remotePath += "/"
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	// Ensure source ends with /
+	src := cwd
+	if !strings.HasSuffix(src, "/") {
+		src += "/"
+	}
+
+	rsyncArgs := []string{
+		"rsync", "-avz", "--progress", "--delete",
+	}
+
+	// Include hidden files before exclude rules
+	for _, inc := range ctx.spec.Sync.IncludeHidden {
+		rsyncArgs = append(rsyncArgs, "--include", inc)
+		// Also include patterns like .env.* if the include is .env
+		if !strings.Contains(inc, "*") {
+			rsyncArgs = append(rsyncArgs, "--include", inc+".*")
+		}
+	}
+
+	// Exclude patterns
+	for _, exc := range ctx.spec.Sync.Exclude {
+		rsyncArgs = append(rsyncArgs, "--exclude", exc)
+	}
+
+	// SSH options
+	sshOpt := fmt.Sprintf("ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i %s", ctx.keyPath)
+	rsyncArgs = append(rsyncArgs, "-e", sshOpt)
+
+	// Source and destination
+	remoteSpec := fmt.Sprintf("%s@%s:%s", ctx.user, ctx.addr, remotePath)
+	rsyncArgs = append(rsyncArgs, src, remoteSpec)
+
+	ui.Info(fmt.Sprintf("Syncing to %s:%s", ctx.inst.Name, remotePath))
+	ui.Step(Verbose, fmt.Sprintf("rsync %s", strings.Join(rsyncArgs[1:], " ")))
+
+	rsyncCmd := exec.Command(rsyncArgs[0], rsyncArgs[1:]...)
+	rsyncCmd.Stdout = os.Stdout
+	rsyncCmd.Stderr = os.Stderr
+	if err := rsyncCmd.Run(); err != nil {
+		return fmt.Errorf("rsync failed: %w", err)
+	}
+
+	ui.Success("Sync complete")
+	return nil
+}
+
 // --- service sync ---
 
 var serviceSyncCmd = &cobra.Command{
@@ -122,65 +185,7 @@ var serviceSyncCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-
-		remotePath := ctx.spec.Remote.Path
-		if remotePath == "" {
-			return fmt.Errorf("remote.path is not set in velocity.yml")
-		}
-
-		// Ensure remote path ends with /
-		if !strings.HasSuffix(remotePath, "/") {
-			remotePath += "/"
-		}
-
-		cwd, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-		// Ensure source ends with /
-		src := cwd
-		if !strings.HasSuffix(src, "/") {
-			src += "/"
-		}
-
-		rsyncArgs := []string{
-			"rsync", "-avz", "--progress", "--delete",
-		}
-
-		// Include hidden files before exclude rules
-		for _, inc := range ctx.spec.Sync.IncludeHidden {
-			rsyncArgs = append(rsyncArgs, "--include", inc)
-			// Also include patterns like .env.* if the include is .env
-			if !strings.Contains(inc, "*") {
-				rsyncArgs = append(rsyncArgs, "--include", inc+".*")
-			}
-		}
-
-		// Exclude patterns
-		for _, exc := range ctx.spec.Sync.Exclude {
-			rsyncArgs = append(rsyncArgs, "--exclude", exc)
-		}
-
-		// SSH options
-		sshOpt := fmt.Sprintf("ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i %s", ctx.keyPath)
-		rsyncArgs = append(rsyncArgs, "-e", sshOpt)
-
-		// Source and destination
-		remoteSpec := fmt.Sprintf("%s@%s:%s", ctx.user, ctx.addr, remotePath)
-		rsyncArgs = append(rsyncArgs, src, remoteSpec)
-
-		ui.Info(fmt.Sprintf("Syncing to %s:%s", ctx.inst.Name, remotePath))
-		ui.Step(Verbose, fmt.Sprintf("rsync %s", strings.Join(rsyncArgs[1:], " ")))
-
-		rsyncCmd := exec.Command(rsyncArgs[0], rsyncArgs[1:]...)
-		rsyncCmd.Stdout = os.Stdout
-		rsyncCmd.Stderr = os.Stderr
-		if err := rsyncCmd.Run(); err != nil {
-			return fmt.Errorf("rsync failed: %w", err)
-		}
-
-		ui.Success("Sync complete")
-		return nil
+		return runSync(ctx)
 	},
 }
 
@@ -197,8 +202,90 @@ var serviceUpCmd = &cobra.Command{
 
 		remotePath := ctx.spec.Remote.Path
 		skipSetup, _ := cmd.Flags().GetBool("skip-setup")
+		skipSync, _ := cmd.Flags().GetBool("skip-sync")
 
-		// 1. Start Docker dependencies (check if already running)
+		// 1. Sync project files to remote
+		if !skipSync {
+			if err := runSync(ctx); err != nil {
+				return err
+			}
+		}
+
+		// 1b. Rewrite localhost URLs in .env files to use the instance domain
+		if ctx.inst.DomainEnabled && ctx.inst.DomainName != "" {
+			domain := "https://" + ctx.inst.DomainName
+
+			// For each service that has a .env, create .env.local with localhost URLs rewritten
+			for svcName, svc := range ctx.spec.Services {
+				svcPath := svc.Path
+				if strings.HasPrefix(svcPath, "./") {
+					svcPath = svcPath[2:]
+				}
+				envPath := fmt.Sprintf("%s/%s/.env", remotePath, svcPath)
+
+				// Read existing .env from remote
+				envContent, err := remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, fmt.Sprintf("cat %s 2>/dev/null", envPath))
+				if err != nil || envContent == "" {
+					continue
+				}
+
+				// Replace all http://localhost:PORT → https://domain
+				localhostRe := regexp.MustCompile(`http://localhost:\d+`)
+				modified := localhostRe.ReplaceAllString(envContent, domain)
+				changed := modified != envContent
+
+				if !changed {
+					continue
+				}
+
+				// Write as .env.local (Next.js .env.local overrides .env)
+				envLocalPath := fmt.Sprintf("%s/%s/.env.local", remotePath, svcPath)
+				writeCmd := fmt.Sprintf("cat > %s << 'ENVEOF'\n%s\nENVEOF", envLocalPath, modified)
+				if _, err := remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, writeCmd); err != nil {
+					ui.Warn(fmt.Sprintf("Failed to write .env.local for %s: %v", svcName, err))
+				} else {
+					ui.Step(Verbose, fmt.Sprintf("%s: rewrote localhost URLs → %s", svcName, ctx.inst.DomainName))
+				}
+			}
+			ui.Success(fmt.Sprintf("Env rewritten for %s", ctx.inst.DomainName))
+		}
+
+		// 2. Check and install runtimes
+		if !skipSetup && len(ctx.spec.Runtime) > 0 {
+			ui.Info("Checking runtimes...")
+			// Source profile.d scripts so PATH includes previously-installed runtimes
+			pathPrefix := "for f in /etc/profile.d/*.sh; do . \"$f\" 2>/dev/null; done; "
+			for _, rt := range ctx.spec.Runtime {
+				if rt.Check == "" {
+					continue
+				}
+				// Run check command to see if runtime is present
+				checkCmd := fmt.Sprintf("%s%s 2>/dev/null && echo 'OK' || echo 'MISSING'", pathPrefix, rt.Check)
+				out, _ := remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, checkCmd)
+				if strings.Contains(out, "OK") {
+					ui.Step(Verbose, fmt.Sprintf("%s: installed", rt.Name))
+					continue
+				}
+
+				if rt.Install == "" {
+					ui.Warn(fmt.Sprintf("%s not found and no install command defined", rt.Name))
+					continue
+				}
+
+				label := rt.Name
+				if rt.Version != "" {
+					label += " " + rt.Version
+				}
+				ui.Info(fmt.Sprintf("Installing %s...", label))
+				installCmd := pathPrefix + rt.Install
+				if err := remotessh.ExecStream(ctx.keyPath, ctx.user, ctx.addr, installCmd); err != nil {
+					return fmt.Errorf("failed to install %s: %w", rt.Name, err)
+				}
+				ui.Success(fmt.Sprintf("%s installed", label))
+			}
+		}
+
+		// 3. Start Docker dependencies (check if already running)
 		if !skipSetup && len(ctx.spec.Dependencies.Docker) > 0 {
 			ui.Info("Checking Docker dependencies...")
 			for _, dep := range ctx.spec.Dependencies.Docker {
@@ -255,7 +342,10 @@ var serviceUpCmd = &cobra.Command{
 			}
 		}
 
-		// 2. Run lifecycle.setup (skip if node_modules exists)
+		// Ensure installed runtimes are in PATH for setup/start commands
+		envPrefix := "for f in /etc/profile.d/*.sh; do . \"$f\" 2>/dev/null; done; "
+
+		// 4. Run lifecycle.setup (skip if node_modules exists)
 		if !skipSetup && ctx.spec.Lifecycle.Setup != "" {
 			checkCmd := fmt.Sprintf("test -d %s/node_modules && echo 'exists' || echo 'missing'", remotePath)
 			out, _ := remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, checkCmd)
@@ -263,7 +353,7 @@ var serviceUpCmd = &cobra.Command{
 				ui.Info("Dependencies already installed (node_modules found)")
 			} else {
 				ui.Info(fmt.Sprintf("Running setup: %s", ctx.spec.Lifecycle.Setup))
-				setupCmd := fmt.Sprintf("cd %s && %s", remotePath, ctx.spec.Lifecycle.Setup)
+				setupCmd := fmt.Sprintf("%scd %s && %s", envPrefix, remotePath, ctx.spec.Lifecycle.Setup)
 				if err := remotessh.ExecStream(ctx.keyPath, ctx.user, ctx.addr, setupCmd); err != nil {
 					return fmt.Errorf("setup failed: %w", err)
 				}
@@ -271,15 +361,16 @@ var serviceUpCmd = &cobra.Command{
 			}
 		}
 
-		// 3. Run lifecycle.start
+		// 5. Run lifecycle.start
 		if ctx.spec.Lifecycle.Start != "" {
 			detach, _ := cmd.Flags().GetBool("detach")
 			if detach {
 				// Background mode: nohup + log file
 				ui.Info(fmt.Sprintf("Starting services (detached): %s", ctx.spec.Lifecycle.Start))
+				// Use setsid to fully detach the process from the SSH session
 				startCmd := fmt.Sprintf(
-					"cd %s && nohup %s > %s 2>&1 & echo $!",
-					remotePath, ctx.spec.Lifecycle.Start, ctx.logPath,
+					"%scd %s && setsid bash -c '%s' > %s 2>&1 < /dev/null & echo $!",
+					envPrefix, remotePath, ctx.spec.Lifecycle.Start, ctx.logPath,
 				)
 				out, err := remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, startCmd)
 				if err != nil {
@@ -328,7 +419,7 @@ var serviceUpCmd = &cobra.Command{
 				ui.Info("Press Ctrl+C to stop")
 				fmt.Println()
 
-				startCmd := fmt.Sprintf("cd %s && %s", remotePath, ctx.spec.Lifecycle.Start)
+				startCmd := fmt.Sprintf("%scd %s && %s", envPrefix, remotePath, ctx.spec.Lifecycle.Start)
 				return remotessh.ExecStream(ctx.keyPath, ctx.user, ctx.addr, startCmd)
 			}
 		}
@@ -339,67 +430,110 @@ var serviceUpCmd = &cobra.Command{
 	},
 }
 
-// --- service start ---
+// --- service down ---
 
-var serviceStartCmd = &cobra.Command{
-	Use:   "start",
-	Short: "Start the dev process (assumes deps and setup are done)",
+var serviceDownCmd = &cobra.Command{
+	Use:   "down",
+	Short: "Stop the dev process (and optionally Docker dependencies)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, err := resolveService(cmd)
 		if err != nil {
 			return err
 		}
 
-		if ctx.spec.Lifecycle.Start == "" {
-			return fmt.Errorf("no lifecycle.start command defined in velocity.yml")
-		}
+		all, _ := cmd.Flags().GetBool("all")
 
-		remotePath := ctx.spec.Remote.Path
-
-		ui.Info(fmt.Sprintf("Starting: %s", ctx.spec.Lifecycle.Start))
-		startCmd := fmt.Sprintf(
-			"cd %s && nohup %s > %s 2>&1 & echo $!",
-			remotePath, ctx.spec.Lifecycle.Start, ctx.logPath,
-		)
-		out, err := remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, startCmd)
-		if err != nil {
-			return fmt.Errorf("failed to start: %w", err)
-		}
-
-		ui.Success(fmt.Sprintf("Started (PID: %s)", strings.TrimSpace(out)))
-		ui.Info("Use 'vctl service logs' to view output")
-		return nil
-	},
-}
-
-// --- service stop ---
-
-var serviceStopCmd = &cobra.Command{
-	Use:   "stop",
-	Short: "Stop the running dev process",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		ctx, err := resolveService(cmd)
-		if err != nil {
-			return err
-		}
-
+		// Stop dev process
 		if ctx.spec.Lifecycle.Stop != "" {
 			ui.Info(fmt.Sprintf("Running stop command: %s", ctx.spec.Lifecycle.Stop))
 			remotePath := ctx.spec.Remote.Path
 			stopCmd := fmt.Sprintf("cd %s && %s", remotePath, ctx.spec.Lifecycle.Stop)
 			if err := remotessh.ExecStream(ctx.keyPath, ctx.user, ctx.addr, stopCmd); err != nil {
 				ui.Warn(fmt.Sprintf("Stop command failed: %v", err))
-				ui.Info("Attempting to kill the process by log file...")
 			} else {
-				ui.Success("Services stopped")
-				return nil
+				ui.Success("Dev process stopped")
 			}
 		}
 
-		// Fallback: find and kill processes writing to the log
-		killCmd := fmt.Sprintf("pkill -f '%s' 2>/dev/null; echo done", ctx.spec.Lifecycle.Start)
-		remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, killCmd)
-		ui.Success("Stop signal sent")
+		// Fallback: kill processes matching lifecycle.start
+		if ctx.spec.Lifecycle.Start != "" {
+			killCmd := fmt.Sprintf("pkill -f '%s' 2>/dev/null; true", ctx.spec.Lifecycle.Start)
+			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, killCmd)
+		}
+
+		// Stop Docker dependencies if --all
+		if all && len(ctx.spec.Dependencies.Docker) > 0 {
+			ui.Info("Stopping Docker dependencies...")
+			for _, dep := range ctx.spec.Dependencies.Docker {
+				stop := ui.Spinner(fmt.Sprintf("Stopping %s", dep.Name))
+				_, err := remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, fmt.Sprintf("docker stop %s 2>/dev/null", dep.Name))
+				stop()
+				if err != nil {
+					ui.Step(Verbose, fmt.Sprintf("%s: not running", dep.Name))
+				} else {
+					ui.Success(fmt.Sprintf("%s stopped (data preserved)", dep.Name))
+				}
+			}
+		}
+
+		// Stop Traefik if --all
+		if all {
+			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, "cd /opt/traefik && docker compose down 2>/dev/null; true")
+		}
+
+		ui.Success("Environment is down")
+		return nil
+	},
+}
+
+// --- service reset ---
+
+var serviceResetCmd = &cobra.Command{
+	Use:   "reset",
+	Short: "Clean slate: stop everything, remove containers, delete node_modules",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, err := resolveService(cmd)
+		if err != nil {
+			return err
+		}
+
+		remotePath := ctx.spec.Remote.Path
+
+		// 1. Stop dev process
+		if ctx.spec.Lifecycle.Stop != "" {
+			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, fmt.Sprintf("cd %s && %s 2>/dev/null; true", remotePath, ctx.spec.Lifecycle.Stop))
+		}
+		if ctx.spec.Lifecycle.Start != "" {
+			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, fmt.Sprintf("pkill -f '%s' 2>/dev/null; true", ctx.spec.Lifecycle.Start))
+		}
+		ui.Success("Dev process stopped")
+
+		// 2. Remove Docker containers and volumes
+		if len(ctx.spec.Dependencies.Docker) > 0 {
+			ui.Info("Removing Docker containers and volumes...")
+			for _, dep := range ctx.spec.Dependencies.Docker {
+				stop := ui.Spinner(fmt.Sprintf("Removing %s", dep.Name))
+				remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, fmt.Sprintf("docker rm -f %s 2>/dev/null; true", dep.Name))
+				stop()
+				ui.Step(Verbose, fmt.Sprintf("%s removed", dep.Name))
+			}
+		}
+
+		// 3. Stop and remove Traefik
+		remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, "cd /opt/traefik && docker compose down -v 2>/dev/null; true")
+
+		// 4. Delete node_modules, .turbo, .next, dist
+		ui.Info("Cleaning build artifacts...")
+		cleanCmd := fmt.Sprintf("cd %s && rm -rf node_modules .turbo .next dist apps/*/node_modules apps/*/.turbo apps/*/.next apps/*/dist packages/*/node_modules packages/*/.turbo packages/*/dist 2>/dev/null; echo done", remotePath)
+		stop := ui.Spinner("Deleting node_modules and caches")
+		remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, cleanCmd)
+		stop()
+
+		// 5. Remove log file
+		remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, fmt.Sprintf("rm -f %s", ctx.logPath))
+
+		fmt.Println()
+		ui.Success("Clean slate. Run 'vctl service up' to rebuild from scratch.")
 		return nil
 	},
 }
@@ -565,10 +699,10 @@ func deployTraefik(ctx *serviceContext) error {
 certificatesResolvers:
   letsencrypt:
     acme:
-      email: engineering@smallest.ai
+      email: developer@smallest.ai
       storage: /etc/traefik/acme/acme.json
-      dnsChallenge:
-        provider: route53
+      httpChallenge:
+        entryPoint: web
 
 providers:
   file:
@@ -585,7 +719,7 @@ providers:
 		return err
 	}
 
-	routesYml := generateRoutesYml(ctx.spec.Services, domain)
+	routesYml := generateRoutesYml(ctx.spec.Services, domain, ctx.spec.Network.AllowedIPs)
 	if err := os.WriteFile(filepath.Join(dynamicDir, "routes.yml"), []byte(routesYml), 0644); err != nil {
 		return err
 	}
@@ -631,7 +765,7 @@ providers:
 }
 
 // generateRoutesYml creates the Traefik dynamic routes configuration from velocity.yml services.
-func generateRoutesYml(services map[string]velocity.Service, domain string) string {
+func generateRoutesYml(services map[string]velocity.Service, domain string, allowedIPs []string) string {
 	var sb strings.Builder
 	sb.WriteString("http:\n")
 
@@ -645,6 +779,18 @@ func generateRoutesYml(services map[string]velocity.Service, domain string) stri
 		entries = append(entries, svcEntry{name: name, service: svc})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
+
+	// Middlewares (IP allowlist if configured)
+	hasAllowList := len(allowedIPs) > 0
+	if hasAllowList {
+		sb.WriteString("  middlewares:\n")
+		sb.WriteString("    vpn-only:\n")
+		sb.WriteString("      ipAllowList:\n")
+		sb.WriteString("        sourceRange:\n")
+		for _, ip := range allowedIPs {
+			sb.WriteString(fmt.Sprintf("          - \"%s\"\n", ip))
+		}
+	}
 
 	// Routers
 	sb.WriteString("  routers:\n")
@@ -663,6 +809,10 @@ func generateRoutesYml(services map[string]velocity.Service, domain string) stri
 			sb.WriteString("        - websecure\n")
 			sb.WriteString("      tls:\n")
 			sb.WriteString("        certResolver: letsencrypt\n")
+			if hasAllowList {
+				sb.WriteString("      middlewares:\n")
+				sb.WriteString("        - vpn-only\n")
+			}
 			if route.Priority > 0 {
 				sb.WriteString(fmt.Sprintf("      priority: %d\n", route.Priority))
 			}
@@ -687,12 +837,15 @@ func init() {
 	serviceCmd.PersistentFlags().StringP("instance", "i", "", "Target instance (name or ID)")
 
 	serviceUpCmd.Flags().Bool("detach", false, "Run services in background (default: foreground with live output)")
-	serviceUpCmd.Flags().Bool("skip-setup", false, "Skip dependency startup and npm install")
+	serviceUpCmd.Flags().Bool("skip-sync", false, "Skip file sync to remote")
+	serviceUpCmd.Flags().Bool("skip-setup", false, "Skip runtimes, dependencies, and setup")
+
+	serviceDownCmd.Flags().Bool("all", false, "Also stop Docker dependencies and Traefik")
 
 	serviceCmd.AddCommand(serviceSyncCmd)
 	serviceCmd.AddCommand(serviceUpCmd)
-	serviceCmd.AddCommand(serviceStartCmd)
-	serviceCmd.AddCommand(serviceStopCmd)
+	serviceCmd.AddCommand(serviceDownCmd)
+	serviceCmd.AddCommand(serviceResetCmd)
 	serviceCmd.AddCommand(serviceStatusCmd)
 	serviceCmd.AddCommand(serviceLogsCmd)
 	serviceCmd.AddCommand(serviceTraefikCmd)

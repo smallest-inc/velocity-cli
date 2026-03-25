@@ -19,10 +19,20 @@ type ProjectSpec struct {
 	Kind         string             `yaml:"kind"`
 	Metadata     Metadata           `yaml:"metadata"`
 	Remote       Remote             `yaml:"remote"`
+	Runtime      []Runtime          `yaml:"runtime"`
 	Services     map[string]Service `yaml:"services"`
 	Lifecycle    Lifecycle          `yaml:"lifecycle"`
 	Sync         SyncConfig         `yaml:"sync"`
 	Dependencies Dependencies       `yaml:"dependencies"`
+	Network      NetworkConfig      `yaml:"network"`
+}
+
+// Runtime describes a runtime dependency that must be present on the instance.
+type Runtime struct {
+	Name    string `yaml:"name"`
+	Version string `yaml:"version"`
+	Check   string `yaml:"check"`
+	Install string `yaml:"install"`
 }
 
 // Metadata describes the project.
@@ -49,6 +59,11 @@ type Service struct {
 type Route struct {
 	Path     string `yaml:"path"`
 	Priority int    `yaml:"priority"`
+}
+
+// NetworkConfig describes network/access control settings.
+type NetworkConfig struct {
+	AllowedIPs []string `yaml:"allowed_ips"`
 }
 
 // Lifecycle contains commands for the project lifecycle.
