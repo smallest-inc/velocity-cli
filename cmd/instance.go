@@ -421,10 +421,10 @@ Non-interactive mode (for scripting and agentic control):
 				apiClient.Get(fmt.Sprintf("/cloud/providers/%s/dns/hosted-zones", providers[0].ID), &zones)
 			}
 
-			if len(zones) > 0 {
-				subdomain := domainFlag
-				selectedZoneID := zoneFlag
+			subdomain := domainFlag
+			selectedZoneID := zoneFlag
 
+			if len(zones) > 0 {
 				if interactive {
 					// Prompt for subdomain
 					subdomain = ui.Prompt(fmt.Sprintf("Subdomain (enter for '%s')", name))
@@ -449,26 +449,36 @@ Non-interactive mode (for scripting and agentic control):
 						}
 					}
 				} else {
-					// Non-interactive: only auto-provision if default zone is set
 					if subdomain == "" {
 						subdomain = name
 					}
 					if selectedZoneID == "" && defaultZoneID != "" {
 						selectedZoneID = defaultZoneID
 					}
-					// No default zone and no flag → skip domain silently
 				}
-
-				if selectedZoneID != "" {
-					reqBody["domain"] = map[string]interface{}{
-						"enabled":        true,
-						"subdomain":      subdomain,
-						"hosted_zone_id": selectedZoneID,
+			} else if defaultZoneID != "" {
+				// No zones fetched but launch config has a default — use it
+				ui.Step(Verbose, "Using default hosted zone from launch config")
+				selectedZoneID = defaultZoneID
+				if subdomain == "" {
+					if interactive {
+						subdomain = ui.Prompt(fmt.Sprintf("Subdomain (enter for '%s')", name))
 					}
-					ui.Step(Verbose, fmt.Sprintf("Domain: %s (zone: %s)", subdomain, selectedZoneID))
+					if subdomain == "" {
+						subdomain = name
+					}
 				}
 			} else {
-				ui.Step(Verbose, "No hosted zones found, skipping domain")
+				ui.Step(Verbose, "No hosted zones available, skipping domain")
+			}
+
+			if selectedZoneID != "" {
+				reqBody["domain"] = map[string]interface{}{
+					"enabled":        true,
+					"subdomain":      subdomain,
+					"hosted_zone_id": selectedZoneID,
+				}
+				ui.Step(Verbose, fmt.Sprintf("Domain: %s (zone: %s)", subdomain, selectedZoneID))
 			}
 		}
 
