@@ -868,8 +868,11 @@ func generateRoutesYml(services map[string]velocity.Service, domain string, allo
 	// Routers
 	sb.WriteString("  routers:\n")
 	for _, e := range entries {
-		for _, route := range e.service.Routes {
+		for ri, route := range e.service.Routes {
 			routerName := e.name
+			if ri > 0 {
+				routerName = fmt.Sprintf("%s-%d", e.name, ri)
+			}
 			rule := fmt.Sprintf("Host(`%s`)", domain)
 			if route.Path != "" {
 				rule = fmt.Sprintf("Host(`%s`) && PathPrefix(`%s`)", domain, route.Path)
@@ -877,7 +880,7 @@ func generateRoutesYml(services map[string]velocity.Service, domain string, allo
 
 			sb.WriteString(fmt.Sprintf("    %s:\n", routerName))
 			sb.WriteString(fmt.Sprintf("      rule: \"%s\"\n", rule))
-			sb.WriteString(fmt.Sprintf("      service: %s\n", routerName))
+			sb.WriteString(fmt.Sprintf("      service: %s\n", e.name))
 			sb.WriteString("      entryPoints:\n")
 			sb.WriteString("        - websecure\n")
 			sb.WriteString("      tls:\n")
