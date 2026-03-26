@@ -232,27 +232,8 @@ var serviceUpCmd = &cobra.Command{
 					continue
 				}
 
-				// Replace http://localhost:PORT → https://domain only for declared env var prefixes
-				localhostRe := regexp.MustCompile(`http://localhost:\d+`)
-				rewritePrefixes := ctx.spec.Sync.EnvRewriteVars
-				var modifiedLines []string
-				for _, line := range strings.Split(envContent, "\n") {
-					if len(rewritePrefixes) > 0 {
-						for _, prefix := range rewritePrefixes {
-							if strings.HasPrefix(line, prefix) {
-								line = localhostRe.ReplaceAllString(line, domain)
-								break
-							}
-						}
-					} else {
-						// No prefixes defined — rewrite all (backward compat)
-						line = localhostRe.ReplaceAllString(line, domain)
-					}
-					modifiedLines = append(modifiedLines, line)
-				}
-				modified := strings.Join(modifiedLines, "\n")
-
-				// Apply env_transforms from velocity.yml
+				// Apply env_transforms first (before localhost rewrite)
+				modified := envContent
 				for _, t := range ctx.spec.Sync.EnvTransforms {
 					// Skip if scoped to specific services and this isn't one
 					if len(t.Services) > 0 {
@@ -283,6 +264,25 @@ var serviceUpCmd = &cobra.Command{
 					repl = strings.ReplaceAll(repl, "{{.Remote.Path}}", remotePath)
 					modified = re.ReplaceAllString(modified, repl)
 				}
+
+				// Then replace http://localhost:PORT → https://domain for declared prefixes
+				localhostRe := regexp.MustCompile(`http://localhost:\d+`)
+				rewritePrefixes := ctx.spec.Sync.EnvRewriteVars
+				var rewrittenLines []string
+				for _, line := range strings.Split(modified, "\n") {
+					if len(rewritePrefixes) > 0 {
+						for _, prefix := range rewritePrefixes {
+							if strings.HasPrefix(line, prefix) {
+								line = localhostRe.ReplaceAllString(line, domain)
+								break
+							}
+						}
+					} else {
+						line = localhostRe.ReplaceAllString(line, domain)
+					}
+					rewrittenLines = append(rewrittenLines, line)
+				}
+				modified = strings.Join(rewrittenLines, "\n")
 
 				changed := modified != envContent
 				if !changed {
