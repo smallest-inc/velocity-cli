@@ -50,6 +50,8 @@ type launchConfig struct {
 	IsDefault             bool    `json:"is_default"`
 	DefaultHostedZoneID   string  `json:"default_hosted_zone_id"`
 	DomainPrefix          string  `json:"domain_prefix"`
+	UseSpot               bool    `json:"use_spot"`
+	SpotMaxPrice          string  `json:"spot_max_price"`
 }
 
 type sshKey struct {
@@ -242,6 +244,8 @@ Non-interactive mode (for scripting and agentic control):
 		domainFlag, _ := cmd.Flags().GetString("domain")
 		zoneFlag, _ := cmd.Flags().GetString("hosted-zone")
 		noWaitFlag, _ := cmd.Flags().GetBool("no-wait")
+		spotFlag, _ := cmd.Flags().GetBool("spot")
+		onDemandFlag, _ := cmd.Flags().GetBool("on-demand")
 
 		// Determine mode: if --name flag is set, treat as non-interactive (skip all prompts)
 		interactive := nameFlag == "" && ui.IsInteractive()
@@ -391,12 +395,20 @@ Non-interactive mode (for scripting and agentic control):
 		if typeFlag != "" {
 			overrides["instance_type"] = typeFlag
 		} else if interactive {
-			if v := ui.Prompt("Instance type override (enter to skip)"); v != "" {
+			if v := ui.Prompt(fmt.Sprintf("Instance type (enter for '%s')", selectedConfig.InstanceType)); v != "" {
 				overrides["instance_type"] = v
 			}
 		}
 		if len(overrides) > 0 {
 			reqBody["overrides"] = overrides
+		}
+
+		// Spot instance override: --spot forces spot, --on-demand forces on-demand.
+		// If neither specified, the launch config default is used (no override sent).
+		if spotFlag {
+			reqBody["use_spot"] = true
+		} else if onDemandFlag {
+			reqBody["use_spot"] = false
 		}
 
 		// Domain — enabled by default, use --no-domain to opt out
@@ -495,6 +507,14 @@ Non-interactive mode (for scripting and agentic control):
 		err = apiClient.Post(fmt.Sprintf("/projects/%s/cloud/instances", cfg.ProjectID), reqBody, &result)
 		stop()
 		if err != nil {
+			// Clean up auto-managed SSH key on provision failure
+			if useAutoKeys && autoKeySSHID != "" {
+				apiClient.Delete(fmt.Sprintf("/projects/%s/cloud/ssh-keys/%s", cfg.ProjectID, autoKeySSHID), nil)
+				if autoKeyPrivPath != "" {
+					os.Remove(autoKeyPrivPath)
+					os.Remove(autoKeyPrivPath + ".pub")
+				}
+			}
 			return err
 		}
 
@@ -901,6 +921,8 @@ func init() {
 	instanceProvisionCmd.Flags().Bool("no-domain", false, "Skip domain provisioning")
 	instanceProvisionCmd.Flags().Bool("auto-keys", false, "Auto-generate and manage SSH keypair (implied when --ssh-keys not provided)")
 	instanceProvisionCmd.Flags().Bool("no-wait", false, "Don't wait for instance to reach running state")
+	instanceProvisionCmd.Flags().Bool("spot", false, "Force spot instance (overrides launch config)")
+	instanceProvisionCmd.Flags().Bool("on-demand", false, "Force on-demand instance (overrides launch config)")
 
 	instanceTerminateCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
 	instanceSSHCmd.Flags().StringP("user", "u", "ubuntu", "SSH user")
