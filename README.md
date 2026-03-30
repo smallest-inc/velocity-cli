@@ -18,12 +18,20 @@ Self-update: `vctl upgrade`
 
 ## Quick Start
 
+> **First time?** Ask your org admin to create an account for you on [Strata](https://toggle.strata.foo). Then go to **Identity & Access > Access Tokens** to create a Personal Access Token (PAT).
+
 ```bash
-# Authenticate
+# Authenticate with your PAT
 vctl auth login --token strata_pat_xxx
 
-# Provision an instance
+# Select your project
+vctl project use my-project
+
+# Provision a dev instance
 vctl instance provision --name my-dev
+
+# Set it as default
+vctl instance use my-dev
 
 # Bring up the full dev environment (from project root with velocity.yml)
 vctl service up
@@ -31,9 +39,175 @@ vctl service up
 # Stop everything
 vctl service down
 
-# Terminate the instance
+# Terminate the instance when done
 vctl instance terminate my-dev
 ```
+
+## Authentication
+
+Create a PAT in the [Strata web UI](https://toggle.strata.foo) at **Identity & Access > Access Tokens**. If you don't have an account, ask your org admin to invite you.
+
+```bash
+vctl auth login --token strata_pat_xxx
+vctl auth status
+```
+
+Environment variable overrides:
+
+| Variable | Purpose |
+|----------|---------|
+| `VCTL_TOKEN` | PAT token |
+| `VCTL_ENDPOINT` | Toggle API URL (default: `https://toggle.strata.foo`) |
+| `VCTL_PROJECT` | Active project ID |
+
+## Commands
+
+### Projects
+
+```bash
+vctl project list              # List all projects
+vctl project use <handle>      # Set active project
+```
+
+### Instances
+
+```bash
+vctl instance list                          # List all instances
+vctl instance provision                     # Interactive provisioning
+vctl instance provision --name prod-01      # Non-interactive
+vctl instance provision --name dev --spot   # Spot instance (cheaper, may be reclaimed)
+vctl instance status <name-or-id>           # Refresh status from AWS
+vctl instance start <name-or-id>            # Start stopped instance
+vctl instance stop <name-or-id>             # Stop running instance
+vctl instance terminate <name-or-id>        # Terminate (with confirmation)
+vctl instance terminate <name> --force      # Skip confirmation
+vctl instance ssh <name-or-id>              # SSH into instance
+vctl instance ssh <name> -- -L 8080:localhost:8080
+vctl instance use <name-or-id>              # Set default instance
+```
+
+#### Provision Flags
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--name` | `-n` | Instance name (required for non-interactive) |
+| `--launch-config` | `-l` | Launch config name or ID (uses default if omitted) |
+| `--ssh-keys` | `-k` | Comma-separated key names/IDs (auto-generates if omitted) |
+| `--auto-keys` | | Force auto SSH key generation |
+| `--instance-type` | `-t` | Override instance type (e.g. `m8g.large`) |
+| `--spot` | | Force spot instance (overrides launch config) |
+| `--on-demand` | | Force on-demand instance (overrides launch config) |
+| `--domain` | | Subdomain for DNS record |
+| `--hosted-zone` | | Route53 hosted zone ID |
+| `--no-domain` | | Skip domain provisioning |
+| `--no-wait` | | Don't wait for running state |
+
+When run without flags (interactive mode), vctl prompts for each option with sensible defaults.
+
+#### Spot Instances
+
+Spot instances cost 60-70% less than on-demand. If AWS reclaims a spot instance, Toggle automatically provisions a replacement with the same domain and EIP. Use `--spot` to force spot, `--on-demand` to force on-demand, or configure the default on the launch config.
+
+If spot capacity is unavailable, Toggle falls back to on-demand automatically.
+
+### Services
+
+Requires a `velocity.yml` in the current directory.
+
+```bash
+vctl service up                    # Full pipeline: sync → runtimes → deps → setup → start → traefik
+vctl service up --detach           # Start in background (default: foreground with live output)
+vctl service up --skip-sync        # Skip file sync
+vctl service up --skip-setup       # Skip runtimes, deps, and setup
+vctl service down                  # Stop dev process
+vctl service down --all            # Also stop Docker deps and Traefik
+vctl service reset                 # Clean slate: remove containers, node_modules, caches
+vctl service sync                  # Rsync project files to instance
+vctl service status                # Check which service ports are listening
+vctl service logs                  # Tail the dev process log
+vctl service traefik               # Deploy/update Traefik reverse proxy config
+```
+
+### SSH Keys
+
+```bash
+vctl key list                              # List project SSH keys
+vctl key add my-laptop ~/.ssh/id_ed25519.pub
+vctl key remove my-laptop
+```
+
+Auto SSH key management: when no `--ssh-keys` flag is provided, vctl generates an ed25519 keypair, uploads the public key to Toggle, and cleans up on terminate.
+
+### Launch Configs & Provider
+
+```bash
+vctl config list           # List launch configurations
+vctl provider status       # Show AWS provider config
+vctl provider setup        # Interactive IAM role setup
+```
+
+## Service Up Pipeline
+
+`vctl service up` runs these steps in order:
+
+1. **Sync** — rsync project files to the remote instance
+2. **Env rewrite** — Rewrite `.env` files for the instance domain
+3. **Runtimes** — Check and install declared runtimes (node, go, etc.)
+4. **Docker deps** — Start Docker containers (preserves data across restarts)
+5. **Setup** — Run `lifecycle.setup` (e.g. `npm install`)
+6. **Start** — Run `lifecycle.start` (foreground or detached)
+7. **Traefik** — Deploy reverse proxy with SSL (Let's Encrypt) and IP allowlist
+
+## Non-Interactive / Agentic Mode
+
+All commands work without prompts when flags are provided:
+
+```bash
+vctl auth login --token $PAT
+vctl project use my-project
+vctl instance provision --name worker-01 --spot --no-wait
+vctl instance ssh worker-01 -- "nvidia-smi"
+vctl instance terminate worker-01 --force
+```
+
+When stdin is not a TTY, vctl automatically skips prompts, uses defaults, auto-generates SSH keys, and disables spinner animation.
+
+## Config
+
+```
+~/.vctl/
+├── config.yml          # Endpoint, active project, default instance
+├── credentials         # PAT token (0600 permissions)
+├── keys/               # Auto-generated SSH keypairs
+│   ├── manifest.yml    # Maps instance IDs to key files
+│   ├── vctl-a1b2c3...  # Private key
+│   └── vctl-a1b2c3...pub
+└── update_state.yml    # Auto-update check cache
+```
+
+## Shell Completion
+
+```bash
+# Zsh
+echo 'source <(vctl completion zsh)' >> ~/.zshrc
+
+# Bash
+echo 'source <(vctl completion bash)' >> ~/.bashrc
+
+# Fish
+vctl completion fish | source
+```
+
+## Global Flags
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--endpoint` | | Toggle API endpoint |
+| `--token` | | PAT token (overrides saved credentials) |
+| `--project` | | Project ID (overrides saved selection) |
+| `--quiet` | `-q` | Suppress detailed output (verbose by default) |
+
+---
 
 ## How It Works
 
@@ -86,18 +260,7 @@ runtime:
     install: |
       curl -fsSL https://go.dev/dl/go1.24.1.linux-arm64.tar.gz | sudo tar -C /usr/local -xzf -
       echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' | sudo tee /etc/profile.d/go.sh
-      grep -q '/usr/local/go/bin' ~/.bashrc || echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
       export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
-
-  - name: air
-    check: which air
-    install: go install github.com/air-verse/air@latest
-
-  - name: rds-ca-bundle
-    check: test -f ~/.ssl/rds-global-bundle.pem
-    install: |
-      mkdir -p ~/.ssl
-      curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o ~/.ssl/rds-global-bundle.pem
 
   - name: docker
     check: docker --version
@@ -117,63 +280,72 @@ services:
     port: 4001
     routes:
       - path: /api/v1/
+      - path: /atoms/v1/
   console-backend:
     path: ./apps/console-backend
     port: 4000
     routes:
       - path: /console/
+  payment-service:
+    path: ./apps/payment-service
+    port: 8080
+    routes:
+      - path: /payment/
 
 lifecycle:
-  setup: set -a && source apps/atoms/.env && npm install
+  setup: |
+    set -a && source apps/atoms/.env
+    npm install
+    npx turbo build --filter=@smallest-inc/external-services
+    cd apps/payment-service && npm run db:migrate && cd ../..
   start: export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin && npm run dev
   stop: npx turbo daemon stop
 
 sync:
-  exclude:
-    - node_modules
-    - .turbo
-    - .next
-    - dist
-    - .git
-    - "*.log"
-  include_hidden:
-    - .env
-    - .env.*
+  exclude: [node_modules, .turbo, .next, dist, .git, "*.log"]
+  include_hidden: [.env, ".env.*"]
   env_rewrite_vars:
     - NEXT_PUBLIC_
     - ORIGIN
     - ATOMS_FRONTEND_URL
     - CONSOLE_FRONTEND_URL
+    - WAVES_FRONTEND_URL
+    - UNIVERSE_FRONTEND_URL
+    - UNIFIED_FRONTEND_URL
   env_transforms:
     - match: "%2FUsers%2F[^&]*\\.pem"
       replace: "%2Fhome%2F{{.Remote.User}}%2F.ssl%2Frds-global-bundle.pem"
+    - match: "/Users/[^&\"]*\\.pem"
+      replace: "/home/{{.Remote.User}}/.ssl/rds-global-bundle.pem"
+    - match: "localhost:4000/api/v1"
+      replace: "localhost:4000/console/v1"
+      services: [atoms-frontend]
     - match: "^NODE_ENV=.*"
       replace: "NODE_ENV=development"
-      services: [console-backend, atoms-frontend]
+      services: [console-backend, atoms-frontend, payment-service]
+    - match: "^NODE_ENV=.*"
+      replace: "NODE_ENV=dev"
+      services: [main-backend]
 
 dependencies:
   docker:
     - name: rabbitmq
       image: rabbitmq:3-management
-      ports:
-        - "5672:5672"
-        - "15672:15672"
-    - name: payment-pg
+      ports: ["5672:5672", "15672:15672"]
+    - name: postgres
       image: postgres:16
-      ports:
-        - "5432:5432"
+      ports: ["5432:5432"]
       env:
         POSTGRES_USER: payment_svc
         POSTGRES_PASSWORD: localdev
         POSTGRES_DB: payment_db
-    - name: redis-cluster
+    - name: redis
       image: redis:7
-      ports:
-        - "6379:6379"
+      ports: ["6379:6379"]
 
 network:
   allowed_ips:
-    - "65.2.141.169/32"  # OpenVPN server
+    - "65.2.141.169/32"  # OpenVPN
 ```
 
 ### Spec Reference
@@ -195,9 +367,9 @@ network:
 
 When `service up` runs on a domain-enabled instance, vctl automatically rewrites `.env` files:
 
-1. **`env_rewrite_vars`** — For each declared prefix (e.g. `NEXT_PUBLIC_`), replaces `http://localhost:PORT` with `https://{instance-domain}`. Only browser-facing vars are rewritten; backend-to-backend URLs stay as localhost.
+1. **`env_transforms`** — Run first. Regex-based replacements for things like TLS cert paths or API path fixes. Supports `{{.Remote.User}}` and `{{.Remote.Path}}` template variables. Can be scoped to specific services.
 
-2. **`env_transforms`** — Regex-based replacements for things like TLS cert paths. Supports `{{.Remote.User}}` and `{{.Remote.Path}}` template variables. Can be scoped to specific services.
+2. **`env_rewrite_vars`** — Run second. For each declared prefix (e.g. `NEXT_PUBLIC_`), replaces `http://localhost:PORT` with `https://{instance-domain}`. Only browser-facing vars are rewritten; backend-to-backend URLs stay as localhost.
 
 ### velocity.dev.yml
 
@@ -206,156 +378,3 @@ Optional local overrides (gitignored). Sets the default instance so you don't ne
 ```yaml
 instance: my-dev-box
 ```
-
-## Authentication
-
-```bash
-vctl auth login --token strata_pat_xxx
-vctl auth status
-```
-
-Environment variable overrides:
-
-| Variable | Purpose |
-|----------|---------|
-| `VCTL_TOKEN` | PAT token |
-| `VCTL_ENDPOINT` | Toggle API URL (default: `https://toggle.strata.foo`) |
-| `VCTL_PROJECT` | Active project ID |
-
-## Commands
-
-### Projects
-
-```bash
-vctl project list              # List all projects
-vctl project use <handle>      # Set active project
-```
-
-### Instances
-
-```bash
-vctl instance list                          # List all instances
-vctl instance provision                     # Interactive provisioning
-vctl instance provision --name prod-01      # Non-interactive
-vctl instance status <name-or-id>           # Refresh status from AWS
-vctl instance start <name-or-id>            # Start stopped instance
-vctl instance stop <name-or-id>             # Stop running instance
-vctl instance terminate <name-or-id>        # Terminate (with confirmation)
-vctl instance terminate <name> --force      # Skip confirmation
-vctl instance ssh <name-or-id>              # SSH into instance
-vctl instance ssh <name> -- -L 8080:localhost:8080
-vctl instance use <name-or-id>              # Set default instance
-```
-
-### Services
-
-Requires a `velocity.yml` in the current directory.
-
-```bash
-vctl service up                    # Full pipeline: sync → runtimes → deps → setup → start → traefik
-vctl service up --detach           # Start in background (default: foreground with live output)
-vctl service up --skip-sync        # Skip file sync
-vctl service up --skip-setup       # Skip runtimes, deps, and setup
-vctl service down                  # Stop dev process
-vctl service down --all            # Also stop Docker deps and Traefik
-vctl service reset                 # Clean slate: remove containers, node_modules, caches
-vctl service sync                  # Rsync project files to instance
-vctl service status                # Check which service ports are listening
-vctl service logs                  # Tail the dev process log
-vctl service traefik               # Deploy/update Traefik reverse proxy config
-```
-
-#### Provision Flags
-
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--name` | `-n` | Instance name (required for non-interactive) |
-| `--launch-config` | `-l` | Launch config name or ID (uses default if omitted) |
-| `--ssh-keys` | `-k` | Comma-separated key names/IDs (auto-generates if omitted) |
-| `--auto-keys` | | Force auto SSH key generation |
-| `--instance-type` | `-t` | Override instance type (e.g. `m8g.large`) |
-| `--domain` | | Subdomain for DNS record |
-| `--hosted-zone` | | Route53 hosted zone ID |
-| `--no-domain` | | Skip domain provisioning |
-| `--no-wait` | | Don't wait for running state |
-
-When run without flags (interactive mode), vctl prompts for each option with sensible defaults.
-
-### SSH Keys
-
-```bash
-vctl key list                              # List project SSH keys
-vctl key add my-laptop ~/.ssh/id_ed25519.pub
-vctl key remove my-laptop
-```
-
-Auto SSH key management: when no `--ssh-keys` flag is provided, vctl generates an ed25519 keypair, uploads the public key to Toggle, and cleans up on terminate.
-
-### Launch Configs & Provider
-
-```bash
-vctl config list           # List launch configurations
-vctl provider status       # Show AWS provider config
-vctl provider setup        # Interactive IAM role setup
-```
-
-## Service Up Pipeline
-
-`vctl service up` runs these steps in order:
-
-1. **Sync** — rsync project files to the remote instance
-2. **Env rewrite** — Rewrite `.env` files for the instance domain
-3. **Runtimes** — Check and install declared runtimes (node, go, etc.)
-4. **Docker deps** — Start Docker containers (preserves data across restarts)
-5. **Setup** — Run `lifecycle.setup` (e.g. `npm install`)
-6. **Start** — Run `lifecycle.start` (foreground or detached)
-7. **Traefik** — Deploy reverse proxy with SSL (Let's Encrypt) and IP allowlist
-
-## Non-Interactive / Agentic Mode
-
-All commands work without prompts when flags are provided:
-
-```bash
-vctl auth login --token $PAT
-vctl project use my-project
-vctl instance provision --name worker-01 --launch-config "GPU Large" --no-wait
-vctl instance ssh worker-01 -- "nvidia-smi"
-vctl instance terminate worker-01 --force
-```
-
-When stdin is not a TTY, vctl automatically skips prompts, uses defaults, auto-generates SSH keys, and disables spinner animation.
-
-## Config
-
-```
-~/.vctl/
-├── config.yml          # Endpoint, active project, default instance
-├── credentials         # PAT token (0600 permissions)
-├── keys/               # Auto-generated SSH keypairs
-│   ├── manifest.yml    # Maps instance IDs to key files
-│   ├── vctl-a1b2c3...  # Private key
-│   └── vctl-a1b2c3...pub
-└── update_state.yml    # Auto-update check cache
-```
-
-## Shell Completion
-
-```bash
-# Zsh
-echo 'source <(vctl completion zsh)' >> ~/.zshrc
-
-# Bash
-echo 'source <(vctl completion bash)' >> ~/.bashrc
-
-# Fish
-vctl completion fish | source
-```
-
-## Global Flags
-
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--endpoint` | | Toggle API endpoint |
-| `--token` | | PAT token (overrides saved credentials) |
-| `--project` | | Project ID (overrides saved selection) |
-| `--quiet` | `-q` | Suppress detailed output (verbose by default) |
