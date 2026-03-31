@@ -395,20 +395,14 @@ var serviceUpCmd = &cobra.Command{
 		// Ensure installed runtimes are in PATH for setup/start commands
 		envPrefix := "for f in /etc/profile.d/*.sh; do . \"$f\" 2>/dev/null; done; "
 
-		// 4. Run lifecycle.setup (skip if node_modules exists)
+		// 4. Run lifecycle.setup (always runs — npm install and turbo build are idempotent)
 		if !skipSetup && ctx.spec.Lifecycle.Setup != "" {
-			checkCmd := fmt.Sprintf("test -d %s/node_modules && echo 'exists' || echo 'missing'", remotePath)
-			out, _ := remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, checkCmd)
-			if strings.TrimSpace(out) == "exists" {
-				ui.Info("Dependencies already installed (node_modules found)")
-			} else {
-				ui.Info(fmt.Sprintf("Running setup: %s", ctx.spec.Lifecycle.Setup))
-				setupCmd := fmt.Sprintf("%scd %s && %s", envPrefix, remotePath, ctx.spec.Lifecycle.Setup)
-				if err := remotessh.ExecStream(ctx.keyPath, ctx.user, ctx.addr, setupCmd); err != nil {
-					return fmt.Errorf("setup failed: %w", err)
-				}
-				ui.Success("Setup complete")
+			ui.Info(fmt.Sprintf("Running setup: %s", ctx.spec.Lifecycle.Setup))
+			setupCmd := fmt.Sprintf("%scd %s && %s", envPrefix, remotePath, ctx.spec.Lifecycle.Setup)
+			if err := remotessh.ExecStream(ctx.keyPath, ctx.user, ctx.addr, setupCmd); err != nil {
+				return fmt.Errorf("setup failed: %w", err)
 			}
+			ui.Success("Setup complete")
 		}
 
 		// 5. Run lifecycle.start
