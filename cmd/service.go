@@ -672,6 +672,10 @@ var serviceStatusCmd = &cobra.Command{
 		headers := []string{"SERVICE", "PORT", "STATUS"}
 		var rows [][]string
 		for _, sp := range svcs {
+			if sp.port == 0 {
+				rows = append(rows, []string{sp.name, "-", ui.Gray("no port (background)")})
+				continue
+			}
 			portStr := fmt.Sprintf("%d", sp.port)
 			status := ui.Red("down")
 			if portStatus[portStr] {
