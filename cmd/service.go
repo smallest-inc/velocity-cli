@@ -643,7 +643,7 @@ var serviceStatusCmd = &cobra.Command{
 
 		// Check which ports are listening
 		checkCmd := fmt.Sprintf(
-			`for port in %s; do echo -n "$port:"; lsof -iTCP:$port -sTCP:LISTEN -P -n 2>/dev/null | grep -c LISTEN; done`,
+			`for port in %s; do echo -n "$port:"; ss -tlnp 2>/dev/null | grep -c ":$port "; done`,
 			strings.Join(ports, " "),
 		)
 
