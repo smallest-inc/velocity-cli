@@ -262,6 +262,9 @@ var serviceUpCmd = &cobra.Command{
 					repl := t.Replace
 					repl = strings.ReplaceAll(repl, "{{.Remote.User}}", ctx.user)
 					repl = strings.ReplaceAll(repl, "{{.Remote.Path}}", remotePath)
+					if ctx.inst.DomainName != "" {
+						repl = strings.ReplaceAll(repl, "{{.Domain}}", ctx.inst.DomainName)
+					}
 					modified = re.ReplaceAllString(modified, repl)
 				}
 
