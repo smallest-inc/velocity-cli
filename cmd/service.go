@@ -408,7 +408,29 @@ var serviceUpCmd = &cobra.Command{
 			ui.Success("Setup complete")
 		}
 
-		// 5. Run lifecycle.start
+		// 5. Kill any leftover processes from a previous run before starting
+		if ctx.pidPath != "" {
+			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr,
+				fmt.Sprintf("if [ -f %s ]; then PID=$(cat %s); kill -9 -- -$PID 2>/dev/null; rm -f %s; fi; true",
+					ctx.pidPath, ctx.pidPath, ctx.pidPath))
+		}
+		var preFuserCmds []string
+		for _, svc := range ctx.spec.Services {
+			if svc.Port > 0 {
+				preFuserCmds = append(preFuserCmds, fmt.Sprintf("fuser -k -9 %d/tcp 2>/dev/null", svc.Port))
+			}
+		}
+		if len(preFuserCmds) > 0 {
+			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, strings.Join(preFuserCmds, "; ")+"; true")
+		}
+		// Use pgrep to find PIDs first, then kill them in one batch (avoids
+		// pkill matching itself and avoids race conditions between passes).
+		remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr,
+			fmt.Sprintf(
+				"{ pgrep -f '%s.*(turbo|tsx|next)'; pgrep -x air; pgrep -f '^sh -c.*(tsx|air|next|PORT=)'; } 2>/dev/null | sort -u | xargs -r kill -9 2>/dev/null; true",
+				remotePath))
+
+		// 6. Run lifecycle.start
 		if ctx.spec.Lifecycle.Start != "" {
 			detach, _ := cmd.Flags().GetBool("detach")
 			if detach {
@@ -467,7 +489,13 @@ var serviceUpCmd = &cobra.Command{
 				ui.Info("Press Ctrl+C to stop")
 				fmt.Println()
 
-				startCmd := fmt.Sprintf("%scd %s && %s", envPrefix, remotePath, ctx.spec.Lifecycle.Start)
+				// Save PID to file so `service down` can kill the entire process group.
+				// Use setsid to create a new session, then record the PID.
+				// The command runs in foreground via SSH streaming, but the PID file
+				// lets `down` cleanly kill everything if the SSH session is interrupted.
+				startCmd := fmt.Sprintf(
+					"%scd %s && echo $$ > %s && %s",
+					envPrefix, remotePath, ctx.pidPath, ctx.spec.Lifecycle.Start)
 				return remotessh.ExecStream(ctx.keyPath, ctx.user, ctx.addr, startCmd)
 			}
 		}
@@ -520,13 +548,16 @@ var serviceDownCmd = &cobra.Command{
 			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, strings.Join(fuserCmds, "; ")+"; true")
 		}
 		// Kill orphaned process wrappers left behind by turbo dev.
-		// Turbo spawns sh -c wrappers (for air, tsx watch, next dev) that survive
-		// after the port-holding child is killed by fuser. pkill by project path
-		// catches all processes spawned from within the project directory.
+		// After fuser kills port holders, sh -c wrappers spawned by turbo survive.
+		// Use the saved PID file (now written in both foreground and detach modes)
+		// to kill the entire process group. As a fallback, also pkill known patterns.
 		remotePath := ctx.spec.Remote.Path
+		// Use pgrep to find PIDs first, then kill them in one batch (avoids
+		// pkill matching itself and avoids race conditions between passes).
 		remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr,
-			fmt.Sprintf("pkill -9 -f '%s.*turbo dev' 2>/dev/null; pkill -9 -f '%s.*(tsx watch|air|next dev)' 2>/dev/null; true",
-				remotePath, remotePath))
+			fmt.Sprintf(
+				"{ pgrep -f '%s.*(turbo|tsx|next)'; pgrep -x air; pgrep -f '^sh -c.*(tsx|air|next|PORT=)'; } 2>/dev/null | sort -u | xargs -r kill -9 2>/dev/null; true",
+				remotePath))
 
 		// Stop Docker dependencies if --all
 		if all && len(ctx.spec.Dependencies.Docker) > 0 {
