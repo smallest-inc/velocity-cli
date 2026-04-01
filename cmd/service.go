@@ -503,13 +503,13 @@ var serviceDownCmd = &cobra.Command{
 			}
 		}
 
-		// Kill all service processes: PID group + port-based fuser as reliable cleanup
+		// Kill all service processes: PID group + port-based fuser + orphan cleanup
 		if ctx.pidPath != "" {
 			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr,
 				fmt.Sprintf("if [ -f %s ]; then PID=$(cat %s); kill -9 -- -$PID 2>/dev/null; rm -f %s; fi; true",
 					ctx.pidPath, ctx.pidPath, ctx.pidPath))
 		}
-		// fuser -k on all declared service ports — most reliable way to ensure clean shutdown
+		// fuser -k on all declared service ports
 		var fuserCmds []string
 		for _, svc := range ctx.spec.Services {
 			if svc.Port > 0 {
@@ -519,6 +519,14 @@ var serviceDownCmd = &cobra.Command{
 		if len(fuserCmds) > 0 {
 			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, strings.Join(fuserCmds, "; ")+"; true")
 		}
+		// Kill orphaned process wrappers left behind by turbo dev.
+		// Turbo spawns sh -c wrappers (for air, tsx watch, next dev) that survive
+		// after the port-holding child is killed by fuser. pkill by project path
+		// catches all processes spawned from within the project directory.
+		remotePath := ctx.spec.Remote.Path
+		remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr,
+			fmt.Sprintf("pkill -9 -f '%s.*turbo dev' 2>/dev/null; pkill -9 -f '%s.*(tsx watch|air|next dev)' 2>/dev/null; true",
+				remotePath, remotePath))
 
 		// Stop Docker dependencies if --all
 		if all && len(ctx.spec.Dependencies.Docker) > 0 {
