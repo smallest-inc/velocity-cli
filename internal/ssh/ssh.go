@@ -44,6 +44,8 @@ func ExecStream(keyPath, user, addr, command string) error {
 }
 
 // ExecInteractive replaces the current process with an interactive SSH session.
+// extraArgs are split into SSH flags (starting with "-") placed before user@host,
+// and a remote command placed after user@host.
 func ExecInteractive(keyPath, user, addr string, extraArgs ...string) error {
 	sshBin, err := findBinary("ssh")
 	if err != nil {
@@ -52,8 +54,19 @@ func ExecInteractive(keyPath, user, addr string, extraArgs ...string) error {
 
 	args := []string{"ssh"}
 	args = append(args, commonArgs(keyPath)...)
-	args = append(args, extraArgs...)
+
+	// Split extraArgs: flags before user@host, command after
+	var remoteCmd []string
+	for _, arg := range extraArgs {
+		if strings.HasPrefix(arg, "-") {
+			args = append(args, arg)
+		} else {
+			remoteCmd = append(remoteCmd, arg)
+		}
+	}
+
 	args = append(args, fmt.Sprintf("%s@%s", user, addr))
+	args = append(args, remoteCmd...)
 
 	return syscall.Exec(sshBin, args, os.Environ())
 }
