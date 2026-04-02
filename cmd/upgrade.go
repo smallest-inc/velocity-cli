@@ -3,7 +3,6 @@ package cmd
 import (
 	"archive/tar"
 	"compress/gzip"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,22 +11,9 @@ import (
 	"strings"
 
 	"github.com/smallest-inc/velocity-cli/internal/ui"
+	"github.com/smallest-inc/velocity-cli/internal/update"
 	"github.com/spf13/cobra"
 )
-
-const (
-	releaseAPI = "https://api.github.com/repos/smallest-inc/velocity-cli/releases/latest"
-)
-
-type githubRelease struct {
-	TagName string        `json:"tag_name"`
-	Assets  []githubAsset `json:"assets"`
-}
-
-type githubAsset struct {
-	Name               string `json:"name"`
-	BrowserDownloadURL string `json:"browser_download_url"`
-}
 
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
@@ -36,20 +22,10 @@ var upgradeCmd = &cobra.Command{
 		ui.Step(Verbose, "Checking for latest release")
 		stop := ui.Spinner("Checking for updates")
 
-		resp, err := http.Get(releaseAPI)
+		release, err := update.FetchLatestRelease()
 		stop()
 		if err != nil {
 			return fmt.Errorf("failed to check for updates: %w", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != 200 {
-			return fmt.Errorf("failed to check for updates (HTTP %d)", resp.StatusCode)
-		}
-
-		var release githubRelease
-		if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-			return fmt.Errorf("failed to parse release info: %w", err)
 		}
 
 		latestVersion := strings.TrimPrefix(release.TagName, "v")
@@ -60,16 +36,15 @@ var upgradeCmd = &cobra.Command{
 
 		ui.Info(fmt.Sprintf("Current: %s → Latest: %s", version, latestVersion))
 
-		// Find matching asset
-		targetAsset := findAsset(release.Assets)
-		if targetAsset == nil {
+		asset := update.FindAsset(release.Assets)
+		if asset == nil {
 			return fmt.Errorf("no release binary for %s/%s", runtime.GOOS, runtime.GOARCH)
 		}
 
-		ui.Step(Verbose, fmt.Sprintf("Downloading %s", targetAsset.Name))
+		ui.Step(Verbose, fmt.Sprintf("Downloading %s", asset.Name))
 		stop = ui.Spinner(fmt.Sprintf("Downloading %s", latestVersion))
 
-		binResp, err := http.Get(targetAsset.BrowserDownloadURL)
+		binResp, err := http.Get(asset.BrowserDownloadURL)
 		stop()
 		if err != nil {
 			return fmt.Errorf("failed to download: %w", err)
@@ -80,13 +55,11 @@ var upgradeCmd = &cobra.Command{
 			return fmt.Errorf("download failed (HTTP %d)", binResp.StatusCode)
 		}
 
-		// Extract binary from tar.gz
 		newBinary, err := extractBinary(binResp.Body)
 		if err != nil {
 			return fmt.Errorf("failed to extract binary: %w", err)
 		}
 
-		// Replace current binary
 		execPath, err := os.Executable()
 		if err != nil {
 			return fmt.Errorf("failed to find current binary: %w", err)
@@ -94,7 +67,6 @@ var upgradeCmd = &cobra.Command{
 
 		ui.Step(Verbose, fmt.Sprintf("Replacing %s", execPath))
 
-		// Write to temp file, then rename (atomic on same filesystem)
 		tmpPath := execPath + ".new"
 		if err := os.WriteFile(tmpPath, newBinary, 0755); err != nil {
 			return fmt.Errorf("failed to write new binary: %w", err)
@@ -108,18 +80,6 @@ var upgradeCmd = &cobra.Command{
 		ui.Success(fmt.Sprintf("Upgraded to %s", latestVersion))
 		return nil
 	},
-}
-
-func findAsset(assets []githubAsset) *githubAsset {
-	// Match by OS and arch anywhere in the filename
-	// goreleaser names: vctl_0.1.0_darwin_amd64.tar.gz
-	osArch := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
-	for i := range assets {
-		if strings.Contains(assets[i].Name, osArch) && strings.HasSuffix(assets[i].Name, ".tar.gz") {
-			return &assets[i]
-		}
-	}
-	return nil
 }
 
 func extractBinary(r io.Reader) ([]byte, error) {

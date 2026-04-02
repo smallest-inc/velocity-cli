@@ -7,7 +7,6 @@ import (
 	"github.com/smallest-inc/velocity-cli/internal/api"
 	"github.com/smallest-inc/velocity-cli/internal/config"
 	"github.com/smallest-inc/velocity-cli/internal/update"
-	"github.com/smallest-inc/velocity-cli/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -83,14 +82,14 @@ var rootCmd = &cobra.Command{
 			return
 		}
 
-		// Show cached update notification (local file read, zero latency)
-		if msg := update.Notify(version); msg != "" {
-			fmt.Println()
-			ui.Info(msg)
+		// Auto-upgrade: check for new version and silently upgrade after
+		// the user's command completes. Respects a 1h cooldown between checks.
+		// Skipped for dirty/dev builds and when disabled via `vctl settings set auto-upgrade off`.
+		autoUpgradeEnabled := true
+		if cfg != nil {
+			autoUpgradeEnabled = cfg.IsAutoUpgradeEnabled()
 		}
-
-		// Kick off background check for next time (non-blocking)
-		update.CheckInBackground(version)
+		update.AutoUpgrade(version, Quiet, autoUpgradeEnabled)
 	},
 	SilenceUsage:  true,
 	SilenceErrors: true,
