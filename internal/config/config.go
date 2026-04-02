@@ -21,6 +21,15 @@ type Config struct {
 	ProjectDisplayName string `yaml:"project_display_name,omitempty"`
 	InstanceID         string `yaml:"instance_id,omitempty"`
 	InstanceName       string `yaml:"instance_name,omitempty"`
+	AutoUpgrade        *bool  `yaml:"auto_upgrade,omitempty"` // nil = default (on), true = on, false = off
+}
+
+// IsAutoUpgradeEnabled returns true if auto-upgrade is enabled (default: true).
+func (c *Config) IsAutoUpgradeEnabled() bool {
+	if c.AutoUpgrade == nil {
+		return true // default on
+	}
+	return *c.AutoUpgrade
 }
 
 // Credentials stores authentication tokens.
