@@ -268,24 +268,26 @@ var serviceUpCmd = &cobra.Command{
 					modified = re.ReplaceAllString(modified, repl)
 				}
 
-				// Then replace http://localhost:PORT → https://domain for declared prefixes
-				localhostRe := regexp.MustCompile(`http://localhost:\d+`)
+				// Then replace http://localhost:PORT → https://domain for declared prefixes only.
+				// If env_rewrite_vars is empty, skip rewriting entirely — projects that need
+				// localhost URLs rewritten must declare which prefixes explicitly. The previous
+				// behavior of rewriting ALL localhost URLs when no prefixes are declared would
+				// undo env_transforms that intentionally set localhost for backend-to-backend calls.
 				rewritePrefixes := ctx.spec.Sync.EnvRewriteVars
-				var rewrittenLines []string
-				for _, line := range strings.Split(modified, "\n") {
-					if len(rewritePrefixes) > 0 {
+				if len(rewritePrefixes) > 0 {
+					localhostRe := regexp.MustCompile(`http://localhost:\d+`)
+					var rewrittenLines []string
+					for _, line := range strings.Split(modified, "\n") {
 						for _, prefix := range rewritePrefixes {
 							if strings.HasPrefix(line, prefix) {
 								line = localhostRe.ReplaceAllString(line, domain)
 								break
 							}
 						}
-					} else {
-						line = localhostRe.ReplaceAllString(line, domain)
+						rewrittenLines = append(rewrittenLines, line)
 					}
-					rewrittenLines = append(rewrittenLines, line)
+					modified = strings.Join(rewrittenLines, "\n")
 				}
-				modified = strings.Join(rewrittenLines, "\n")
 
 				changed := modified != envContent
 				if !changed {
@@ -423,12 +425,15 @@ var serviceUpCmd = &cobra.Command{
 		if len(preFuserCmds) > 0 {
 			remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, strings.Join(preFuserCmds, "; ")+"; true")
 		}
-		// Use pgrep to find PIDs first, then kill them in one batch (avoids
-		// pkill matching itself and avoids race conditions between passes).
+		// Kill orphaned processes scoped to THIS project only.
+		// Find PIDs by project path in cmdline or cwd, then kill in one batch.
 		remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr,
 			fmt.Sprintf(
-				"{ pgrep -f '%s.*(turbo|tsx|next)'; pgrep -x air; pgrep -f '^sh -c.*(tsx|air|next|PORT=)'; } 2>/dev/null | sort -u | xargs -r kill -9 2>/dev/null; true",
-				remotePath))
+				"{ pgrep -f '%s.*(turbo|tsx|next|air)'; "+
+					"for pid in $(pgrep -x air; pgrep -f '^sh -c.*(tsx|air|next|PORT=)'); do "+
+					"  readlink /proc/$pid/cwd 2>/dev/null | grep -q '%s' && echo $pid; "+
+					"done; } 2>/dev/null | sort -u | xargs -r kill -9 2>/dev/null; true",
+				remotePath, remotePath))
 
 		// 6. Run lifecycle.start
 		if ctx.spec.Lifecycle.Start != "" {
@@ -552,12 +557,15 @@ var serviceDownCmd = &cobra.Command{
 		// Use the saved PID file (now written in both foreground and detach modes)
 		// to kill the entire process group. As a fallback, also pkill known patterns.
 		remotePath := ctx.spec.Remote.Path
-		// Use pgrep to find PIDs first, then kill them in one batch (avoids
-		// pkill matching itself and avoids race conditions between passes).
+		// Kill orphaned processes scoped to THIS project only.
+		// Find PIDs by project path in cmdline or cwd, then kill in one batch.
 		remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr,
 			fmt.Sprintf(
-				"{ pgrep -f '%s.*(turbo|tsx|next)'; pgrep -x air; pgrep -f '^sh -c.*(tsx|air|next|PORT=)'; } 2>/dev/null | sort -u | xargs -r kill -9 2>/dev/null; true",
-				remotePath))
+				"{ pgrep -f '%s.*(turbo|tsx|next|air)'; "+
+					"for pid in $(pgrep -x air; pgrep -f '^sh -c.*(tsx|air|next|PORT=)'); do "+
+					"  readlink /proc/$pid/cwd 2>/dev/null | grep -q '%s' && echo $pid; "+
+					"done; } 2>/dev/null | sort -u | xargs -r kill -9 2>/dev/null; true",
+				remotePath, remotePath))
 
 		// Stop Docker dependencies if --all
 		if all && len(ctx.spec.Dependencies.Docker) > 0 {
