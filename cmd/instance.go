@@ -797,15 +797,17 @@ func findMatchingLocalKey(projectKeys []sshKey) (string, error) {
 }
 
 var instanceSSHCmd = &cobra.Command{
-	Use:   "ssh <name-or-id> [-- extra-ssh-args...]",
+	Use:   "ssh [name-or-id] [-- extra-ssh-args...]",
 	Short: "SSH into an instance",
-	Long: `SSH into an instance. Extra arguments after -- are passed to ssh.
+	Long: `SSH into an instance. Uses the default instance if no name is given.
+Extra arguments after -- are passed to ssh.
 
 Examples:
+  vctl instance ssh                              # uses default instance
   vctl instance ssh mybox
   vctl instance ssh mybox -- -L 8080:localhost:8080
-  vctl instance ssh mybox -- -N -D 1080`,
-	Args:                  cobra.MinimumNArgs(1),
+  vctl instance ssh mybox -- -N -D 1080
+  vctl instance ssh -- hostname                  # run command on default instance`,
 	DisableFlagsInUseLine: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := requireProject(); err != nil {
@@ -813,10 +815,30 @@ Examples:
 		}
 
 		user, _ := cmd.Flags().GetString("user")
-		extraSSHArgs := args[1:] // everything after the instance name
+
+		// Determine instance name and extra SSH args.
+		// Try first arg as instance name; if it fails and a default is set,
+		// treat all args as the remote command on the default instance.
+		var extraSSHArgs []string
 
 		stop := ui.Spinner("Finding instance")
-		inst, err := findInstance(args[0])
+		var inst *instance
+		var err error
+		if len(args) > 0 {
+			inst, err = findInstance(args[0])
+			if err != nil && cfg.InstanceName != "" {
+				// First arg isn't an instance — use default, treat all args as SSH args
+				inst, err = findInstance(cfg.InstanceName)
+				extraSSHArgs = args
+			} else {
+				extraSSHArgs = args[1:]
+			}
+		} else if cfg.InstanceName != "" {
+			inst, err = findInstance(cfg.InstanceName)
+		} else {
+			stop()
+			return fmt.Errorf("no instance specified and no default set. Run 'vctl instance use <name>' first")
+		}
 		stop()
 		if err != nil {
 			return err
@@ -834,8 +856,17 @@ Examples:
 			if err != nil {
 				return err
 			}
-			sshArgs := append([]string{"ssh", "-o", "StrictHostKeyChecking=no", "-i", keyPath}, extraSSHArgs...)
+			sshArgs := []string{"ssh", "-o", "StrictHostKeyChecking=no", "-i", keyPath}
+			var remoteCmd []string
+			for _, arg := range extraSSHArgs {
+				if strings.HasPrefix(arg, "-") {
+					sshArgs = append(sshArgs, arg)
+				} else {
+					remoteCmd = append(remoteCmd, arg)
+				}
+			}
 			sshArgs = append(sshArgs, user+"@"+addr)
+			sshArgs = append(sshArgs, remoteCmd...)
 			return syscall.Exec(sshBin, sshArgs, os.Environ())
 		}
 
@@ -857,8 +888,16 @@ Examples:
 		}
 
 		sshArgs = append(sshArgs, "-o", "StrictHostKeyChecking=no")
-		sshArgs = append(sshArgs, extraSSHArgs...)
+		var fallbackRemoteCmd []string
+		for _, arg := range extraSSHArgs {
+			if strings.HasPrefix(arg, "-") {
+				sshArgs = append(sshArgs, arg)
+			} else {
+				fallbackRemoteCmd = append(fallbackRemoteCmd, arg)
+			}
+		}
 		sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, addr))
+		sshArgs = append(sshArgs, fallbackRemoteCmd...)
 
 		// Find ssh binary
 		sshBin, err := findBinary("ssh")
