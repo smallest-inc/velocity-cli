@@ -33,6 +33,7 @@ type instance struct {
 	RodentNodeID     string  `json:"rodent_node_id"`
 	LaunchConfigID   string  `json:"launch_config_id"`
 	ProvisionedBy    string  `json:"provisioned_by"`
+	IsSpot           bool    `json:"is_spot"`
 	ProvisionedAt    string  `json:"provisioned_at"`
 	TerminatedAt     *string `json:"terminated_at"`
 }
@@ -624,6 +625,10 @@ var instanceStopCmd = &cobra.Command{
 		stop()
 		if err != nil {
 			return err
+		}
+
+		if inst.IsSpot {
+			return fmt.Errorf("spot instances cannot be stopped. Use 'vctl instance terminate %s' instead", inst.Name)
 		}
 
 		stopSpinner := ui.Spinner(fmt.Sprintf("Stopping %s", inst.Name))
