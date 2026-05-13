@@ -404,12 +404,36 @@ Non-interactive mode (for scripting and agentic control):
 			reqBody["overrides"] = overrides
 		}
 
-		// Spot instance override: --spot forces spot, --on-demand forces on-demand.
-		// If neither specified, the launch config default is used (no override sent).
-		if spotFlag {
+		// Pricing model: --spot / --on-demand flags take precedence; otherwise
+		// interactively prompt with the launch config's default pre-selected. In
+		// non-interactive mode with no flag, fall through to the launch config default.
+		switch {
+		case spotFlag:
 			reqBody["use_spot"] = true
-		} else if onDemandFlag {
+		case onDemandFlag:
 			reqBody["use_spot"] = false
+		case interactive:
+			def := "on-demand"
+			if selectedConfig.UseSpot {
+				def = "spot"
+			}
+			for {
+				v := strings.ToLower(strings.TrimSpace(
+					ui.Prompt(fmt.Sprintf("Pricing model — spot (cheaper, reclaimable) or on-demand (stable) (enter for '%s')", def))))
+				if v == "" {
+					v = def
+				}
+				switch v {
+				case "s", "spot":
+					reqBody["use_spot"] = true
+				case "o", "on", "on-demand", "ondemand":
+					reqBody["use_spot"] = false
+				default:
+					ui.Warn("Enter 'spot' or 'on-demand'")
+					continue
+				}
+				break
+			}
 		}
 
 		// Domain — enabled by default, use --no-domain to opt out
