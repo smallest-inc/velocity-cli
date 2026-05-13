@@ -504,6 +504,7 @@ Non-interactive mode (for scripting and agentic control):
 			Instance     instance `json:"instance"`
 			RodentNodeID string   `json:"rodent_node_id"`
 			DomainName   string   `json:"domain_name"`
+			Warnings     []string `json:"warnings"`
 		}
 		err = apiClient.Post(fmt.Sprintf("/projects/%s/cloud/instances", cfg.ProjectID), reqBody, &result)
 		stop()
@@ -535,8 +536,15 @@ Non-interactive mode (for scripting and agentic control):
 		if addr != "" {
 			fmt.Printf("  Address:      %s\n", ui.Cyan(addr))
 		}
-		if result.Instance.DomainName != "" {
+		// Only show Domain when Toggle confirmed the DNS record was created.
+		// Toggle now leaves DomainName empty when CreateDNSRecord failed.
+		if result.Instance.DomainEnabled && result.Instance.DomainName != "" {
 			fmt.Printf("  Domain:       %s\n", ui.Cyan(result.Instance.DomainName))
+		}
+
+		// Surface any partial-failure warnings from the provision response.
+		for _, w := range result.Warnings {
+			ui.Warn(w)
 		}
 
 		// Poll until running (unless --no-wait)
