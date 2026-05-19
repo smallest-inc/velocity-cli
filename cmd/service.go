@@ -213,10 +213,20 @@ var serviceUpCmd = &cobra.Command{
 		remotePath := ctx.spec.Remote.Path
 		skipSetup, _ := cmd.Flags().GetBool("skip-setup")
 		skipSync, _ := cmd.Flags().GetBool("skip-sync")
+		skipSecrets, _ := cmd.Flags().GetBool("skip-secrets")
 
 		// 1. Sync project files to remote
 		if !skipSync {
 			if err := runSync(ctx); err != nil {
+				return err
+			}
+		}
+
+		// 1a. External secrets merge (issue #7). Slotted between sync and
+		// env_transforms so transforms see the merged state and can rewrite
+		// freshly-injected prod-shaped values.
+		if !skipSecrets && ctx.spec.Sync.Secrets != nil && ctx.spec.Sync.Secrets.AWSSecretsManager != nil {
+			if err := mergeAWSSecrets(ctx, ctx.spec.Sync.Secrets.AWSSecretsManager); err != nil {
 				return err
 			}
 		}
@@ -976,6 +986,7 @@ func init() {
 	serviceUpCmd.Flags().Bool("detach", false, "Run services in background (default: foreground with live output)")
 	serviceUpCmd.Flags().Bool("skip-sync", false, "Skip file sync to remote")
 	serviceUpCmd.Flags().Bool("skip-setup", false, "Skip runtimes, dependencies, and setup")
+	serviceUpCmd.Flags().Bool("skip-secrets", false, "Skip AWS Secrets Manager merge into per-service .env (sync.secrets stage)")
 
 	serviceDownCmd.Flags().Bool("all", false, "Also stop Docker dependencies and Traefik")
 

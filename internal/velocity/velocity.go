@@ -76,10 +76,36 @@ type Lifecycle struct {
 
 // SyncConfig controls rsync behavior.
 type SyncConfig struct {
-	Exclude          []string       `yaml:"exclude"`
-	IncludeHidden    []string       `yaml:"include_hidden"`
-	EnvTransforms    []EnvTransform `yaml:"env_transforms"`
-	EnvRewriteVars   []string       `yaml:"env_rewrite_vars"`   // var prefixes for localhost→domain rewrite (e.g. NEXT_PUBLIC_, ORIGIN)
+	Exclude        []string       `yaml:"exclude"`
+	IncludeHidden  []string       `yaml:"include_hidden"`
+	EnvTransforms  []EnvTransform `yaml:"env_transforms"`
+	EnvRewriteVars []string       `yaml:"env_rewrite_vars"` // var prefixes for localhost→domain rewrite (e.g. NEXT_PUBLIC_, ORIGIN)
+	Secrets        *SecretsConfig `yaml:"secrets,omitempty"`
+}
+
+// SecretsConfig declares external secret backends to merge into per-service
+// .env files on the remote box. Currently AWS Secrets Manager only; the
+// schema namespaces under aws_secrets_manager so adding e.g. Vault later
+// is a sibling addition rather than a breaking change.
+type SecretsConfig struct {
+	AWSSecretsManager *AWSSecretsManagerConfig `yaml:"aws_secrets_manager,omitempty"`
+}
+
+// AWSSecretsManagerConfig configures the AWS SM merge stage.
+type AWSSecretsManagerConfig struct {
+	Region          string                  `yaml:"region,omitempty"`           // default: ap-south-1
+	AWSProfile      string                  `yaml:"aws_profile,omitempty"`      // optional override of AWS_PROFILE
+	Services        []SecretsServiceMapping `yaml:"services"`                   // one entry per service whose .env should be merged
+	GlobalBlocklist []string                `yaml:"global_blocklist,omitempty"` // keys never to inject regardless of service
+}
+
+// SecretsServiceMapping maps a service (declared in spec.Services) to a
+// specific SecretsManager secret. Per-service blocklist is additive with
+// the global one.
+type SecretsServiceMapping struct {
+	Name      string   `yaml:"name"`                // must match a key in spec.Services
+	SecretID  string   `yaml:"secret_id"`           // SM SecretId (Name or full ARN)
+	Blocklist []string `yaml:"blocklist,omitempty"` // additive on top of global_blocklist
 }
 
 // EnvTransform describes a regex replacement applied to .env files on the remote.
