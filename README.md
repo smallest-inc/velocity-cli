@@ -360,16 +360,70 @@ network:
 | `sync` | rsync exclude/include patterns |
 | `sync.env_rewrite_vars` | Env var prefixes to rewrite `localhost:PORT` → instance domain |
 | `sync.env_transforms` | Regex replacements on .env files (with optional service scoping) |
+| `sync.secrets` | External-secrets pull (AWS Secrets Manager) merged into per-service `.env` |
 | `dependencies.docker` | Docker containers to run (managed with start/stop, data preserved) |
+| `dependencies.docker.cmd` | Optional argv override for a docker dep's default CMD |
 | `network.allowed_ips` | Traefik IP allowlist for HTTPS routes |
 
 ### Env Rewrite
 
-When `service up` runs on a domain-enabled instance, vctl automatically rewrites `.env` files:
+When `service up` runs on a domain-enabled instance, vctl automatically rewrites `.env` files in three stages:
 
-1. **`env_transforms`** — Run first. Regex-based replacements for things like TLS cert paths or API path fixes. Supports `{{.Remote.User}}` and `{{.Remote.Path}}` template variables. Can be scoped to specific services.
+1. **`sync.secrets`** — Runs first (if configured). Pulls per-service secrets from AWS Secrets Manager **on the laptop** using the developer's local AWS credential chain, then merges any keys the box's `.env` doesn't already have. See [External Secrets](#external-secrets) below.
 
-2. **`env_rewrite_vars`** — Run second. For each declared prefix (e.g. `NEXT_PUBLIC_`), replaces `http://localhost:PORT` with `https://{instance-domain}`. Only browser-facing vars are rewritten; backend-to-backend URLs stay as localhost.
+2. **`env_transforms`** — Regex-based replacements for things like TLS cert paths, redis/nats URLs, or API path fixes. Supports `{{.Remote.User}}`, `{{.Remote.Path}}`, and `{{.Domain}}` template variables. Can be scoped to specific services. Runs **after** secrets so that prod-shape values injected from SM can be rewritten to dev-box-appropriate values.
+
+3. **`env_rewrite_vars`** — Runs last. For each declared prefix (e.g. `NEXT_PUBLIC_`), replaces `http://localhost:PORT` with `https://{instance-domain}`. Only browser-facing vars are rewritten; backend-to-backend URLs stay as localhost.
+
+### External Secrets
+
+Add a `sync.secrets.aws_secrets_manager` block to inject per-service secrets from AWS Secrets Manager into the box's `.env` files (without ever touching the laptop's `.env`):
+
+```yaml
+sync:
+  secrets:
+    aws_secrets_manager:
+      region: ap-south-1                  # default if omitted
+      aws_profile: smallest               # optional; otherwise uses AWS_PROFILE env var or default chain
+      services:
+        - name: main-backend              # must match a key under services.<name>
+          secret_id: dev/main-backend     # SM SecretId (Name or full ARN)
+          blocklist: [NODE_ENV]           # per-service, additive on top of global_blocklist
+      global_blocklist:                   # keys never to inject regardless of service
+        - AWS_ACCESS_KEY_ID
+        - AWS_SECRET_ACCESS_KEY
+        - AWS_SESSION_TOKEN
+        - NEW_RELIC_LICENSE_KEY
+```
+
+**Developer prerequisites:**
+- AWS credentials reachable by the SDK's default chain — env vars, `~/.aws/credentials`, SSO, or IMDS.
+- If `aws_profile` is set in the spec, the named profile must exist in `~/.aws/credentials` (or SSO config). For example, `aws_profile: smallest` requires a `[smallest]` section. The matching `AWS_PROFILE=smallest` env var also works when `aws_profile` is omitted from the spec.
+- IAM permission to `secretsmanager:GetSecretValue` on the listed `secret_id`s.
+- The SecretString must be a **flat JSON object** (`{"KEY": "value", …}`).
+
+**Behavior** (per service mapping):
+1. Fetch the secret from SM.
+2. SSH-read the box's `<remote.path>/<service.path>/.env`.
+3. Compute additions: SM keys minus existing-on-box keys minus (`global_blocklist` ∪ per-service `blocklist`).
+4. SSH-write the merged content if any additions.
+
+Idempotent — keys already present on the box are never overwritten by SM, so re-runs are no-ops once everything's in place.
+
+**Failure modes — all non-fatal:**
+
+| Condition | Behavior |
+|---|---|
+| `sync.secrets` absent | Stage is a no-op |
+| AWS SDK can't load creds | `ui.Warn`, skip stage, continue |
+| Specific secret missing or no IAM access | `ui.Warn`, skip that service, continue |
+| Empty SecretString | `ui.Warn`, skip that service, continue |
+| Non-flat-JSON SecretString | `ui.Warn`, skip that service, continue |
+| Service name not in spec | `ui.Warn`, skip |
+| SSH write fails | `ui.Warn`, continue with next service |
+| Value contains a newline | `ui.Warn`, skip that key (`.env` safety) |
+
+Use `vctl service up --skip-secrets` to bypass the stage entirely.
 
 ### velocity.dev.yml
 
