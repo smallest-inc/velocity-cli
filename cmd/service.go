@@ -116,6 +116,13 @@ var serviceCmd = &cobra.Command{
 	Long:  "Commands for syncing, starting, stopping, and managing services defined in velocity.yml.",
 }
 
+// shellQuote returns s wrapped in single quotes, escaping any embedded
+// single quotes via the standard '\'' trick. Safe to splice into a /bin/sh
+// command line — every byte inside the quotes is taken literally.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // runSync rsyncs the current working directory to the remote instance.
 func runSync(ctx *serviceContext) error {
 	remotePath := ctx.spec.Remote.Path
@@ -385,6 +392,12 @@ var serviceUpCmd = &cobra.Command{
 					dockerCmd += fmt.Sprintf(" -e %s=%s", k, v)
 				}
 				dockerCmd += fmt.Sprintf(" %s", dep.Image)
+				// CMD override: shell-quote each argv element so values with
+				// spaces/dashes/equals (e.g. "--ip 0.0.0.0") don't break the
+				// surrounding `docker run …` command line.
+				for _, arg := range dep.Cmd {
+					dockerCmd += " " + shellQuote(arg)
+				}
 
 				stop := ui.Spinner(fmt.Sprintf("Starting %s", dep.Name))
 				_, err := remotessh.Exec(ctx.keyPath, ctx.user, ctx.addr, dockerCmd)

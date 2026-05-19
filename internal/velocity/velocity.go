@@ -97,12 +97,18 @@ type Dependencies struct {
 }
 
 // DockerDep describes a Docker container dependency.
+//
+// Cmd overrides the container's default CMD. Pass each argv element as a
+// separate list entry (e.g. ["server", "start-dev", "--ip", "0.0.0.0"]) —
+// elements are shell-quoted individually so values containing spaces or
+// shell metacharacters are safe.
 type DockerDep struct {
 	Name     string            `yaml:"name"`
 	Image    string            `yaml:"image"`
 	Ports    []string          `yaml:"ports"`
 	Env      map[string]string `yaml:"env"`
 	Platform string            `yaml:"platform"`
+	Cmd      []string          `yaml:"cmd"`
 }
 
 // DevOverrides holds local developer overrides from velocity.dev.yml.
