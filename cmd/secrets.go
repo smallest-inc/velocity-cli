@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -34,11 +35,12 @@ func mergeAWSSecrets(ctx *serviceContext, cfg *velocity.AWSSecretsManagerConfig)
 
 	// AWS SDK config: profile + region. The profile is optional — if
 	// unset, the SDK falls back to AWS_PROFILE env var, then default
-	// chain (env / ~/.aws/credentials / SSO / IMDS).
+	// chain (env / ~/.aws/config SSO profile / ~/.aws/credentials / IMDS).
 	region := cfg.Region
 	if region == "" {
 		region = "ap-south-1"
 	}
+	profile := awsProfileName(cfg.AWSProfile)
 	loadOpts := []func(*awscfg.LoadOptions) error{awscfg.WithRegion(region)}
 	if cfg.AWSProfile != "" {
 		loadOpts = append(loadOpts, awscfg.WithSharedConfigProfile(cfg.AWSProfile))
@@ -48,7 +50,14 @@ func mergeAWSSecrets(ctx *serviceContext, cfg *velocity.AWSSecretsManagerConfig)
 	defer cancel()
 	awsCfg, err := awscfg.LoadDefaultConfig(loadCtx, loadOpts...)
 	if err != nil {
-		ui.Warn(fmt.Sprintf("secrets: AWS credentials not available — skipping SM merge stage: %v", err))
+		ui.Warn(awsCredentialHint(err, profile))
+		return nil
+	}
+	// Credentials resolve lazily on the first API call. Resolve them here so
+	// an expired SSO session is reported once with the fix, rather than as
+	// an opaque fetch failure per service.
+	if _, err := awsCfg.Credentials.Retrieve(loadCtx); err != nil {
+		ui.Warn(awsCredentialHint(err, profile))
 		return nil
 	}
 	sm := secretsmanager.NewFromConfig(awsCfg)
@@ -141,6 +150,34 @@ func mergeAWSSecrets(ctx *serviceContext, cfg *velocity.AWSSecretsManagerConfig)
 	}
 
 	return nil
+}
+
+// awsProfileName is the profile the SDK resolves: the spec override, then
+// AWS_PROFILE, else "default".
+func awsProfileName(specProfile string) string {
+	if specProfile != "" {
+		return specProfile
+	}
+	if p := os.Getenv("AWS_PROFILE"); p != "" {
+		return p
+	}
+	return "default"
+}
+
+// awsCredentialHint turns a credential-resolution error into one actionable
+// warning. SSO failures (expired or missing cached token, revoked refresh
+// grant) name the exact login command. The aws CLI keeps its own
+// role-credential cache and can keep working for hours after the SSO token
+// expires, so a passing `aws sts get-caller-identity` does not mean vctl has
+// a usable token — the hint says so to avoid that misdiagnosis.
+func awsCredentialHint(err error, profile string) string {
+	if strings.Contains(strings.ToLower(err.Error()), "sso") {
+		return fmt.Sprintf("secrets: AWS SSO session for profile %q is expired or missing. "+
+			"Run `aws sso login --profile %s` and rerun. "+
+			"(The aws CLI may still work from its own cache; vctl needs a live SSO token.) "+
+			"Skipping SM merge stage.", profile, profile)
+	}
+	return fmt.Sprintf("secrets: AWS credentials not available for profile %q — skipping SM merge stage: %v", profile, err)
 }
 
 // parseEnvKeys reads .env text and returns the set of keys (the text left of

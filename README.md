@@ -397,8 +397,9 @@ sync:
 ```
 
 **Developer prerequisites:**
-- AWS credentials reachable by the SDK's default chain — env vars, `~/.aws/credentials`, SSO, or IMDS.
-- If `aws_profile` is set in the spec, the named profile must exist in `~/.aws/credentials` (or SSO config). For example, `aws_profile: smallest` requires a `[smallest]` section. The matching `AWS_PROFILE=smallest` env var also works when `aws_profile` is omitted from the spec.
+- AWS credentials reachable by the SDK's default chain — env vars, an SSO profile in `~/.aws/config`, `~/.aws/credentials`, or IMDS.
+- If `aws_profile` is set in the spec, the named profile must exist locally. For example, `aws_profile: smallest` requires `[profile smallest]` in `~/.aws/config` (SSO) or `[smallest]` in `~/.aws/credentials` (static keys). The matching `AWS_PROFILE=smallest` env var also works when `aws_profile` is omitted from the spec.
+- SSO profiles need a live token: `aws sso login --profile smallest`. When it expires, `vctl` prints one warning with that command and skips the stage. The `aws` CLI can keep working from its own credential cache for hours after the token expires, so a passing `aws sts get-caller-identity` does not mean `vctl` has a usable token.
 - IAM permission to `secretsmanager:GetSecretValue` on the listed `secret_id`s.
 - The SecretString must be a **flat JSON object** (`{"KEY": "value", …}`).
 
