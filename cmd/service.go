@@ -840,13 +840,14 @@ func deployTraefik(ctx *serviceContext) error {
   websecure:
     address: ":443"
 
+# TLS-ALPN-01 runs the ACME challenge on :443, which the instance security
+# group opens publicly. :80 is VPN-only, so HTTP-01 can never complete.
 certificatesResolvers:
   letsencrypt:
     acme:
       email: developer@smallest.ai
       storage: /etc/traefik/acme/acme.json
-      httpChallenge:
-        entryPoint: web
+      tlsChallenge: {}
 
 providers:
   file:
@@ -924,10 +925,28 @@ func generateRoutesYml(services map[string]velocity.Service, domain string, allo
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
 
-	// Middlewares (IP allowlist if configured)
+	routerName := func(svc string, ri int) string {
+		if ri > 0 {
+			return fmt.Sprintf("%s-%d", svc, ri)
+		}
+		return svc
+	}
+
+	// Middlewares: IP allowlist if configured, plus one stripPrefix per
+	// route that asks for it (services that serve at / behind a prefix).
 	hasAllowList := len(allowedIPs) > 0
-	if hasAllowList {
+	var stripRoutes []string
+	for _, e := range entries {
+		for ri, route := range e.service.Routes {
+			if route.StripPrefix && route.Path != "" {
+				stripRoutes = append(stripRoutes, routerName(e.name, ri))
+			}
+		}
+	}
+	if hasAllowList || len(stripRoutes) > 0 {
 		sb.WriteString("  middlewares:\n")
+	}
+	if hasAllowList {
 		sb.WriteString("    vpn-only:\n")
 		sb.WriteString("      ipAllowList:\n")
 		sb.WriteString("        sourceRange:\n")
@@ -935,30 +954,46 @@ func generateRoutesYml(services map[string]velocity.Service, domain string, allo
 			sb.WriteString(fmt.Sprintf("          - \"%s\"\n", ip))
 		}
 	}
+	for _, e := range entries {
+		for ri, route := range e.service.Routes {
+			if route.StripPrefix && route.Path != "" {
+				sb.WriteString(fmt.Sprintf("    %s-strip:\n", routerName(e.name, ri)))
+				sb.WriteString("      stripPrefix:\n")
+				sb.WriteString("        prefixes:\n")
+				sb.WriteString(fmt.Sprintf("          - \"%s\"\n", route.Path))
+			}
+		}
+	}
 
 	// Routers
 	sb.WriteString("  routers:\n")
 	for _, e := range entries {
 		for ri, route := range e.service.Routes {
-			routerName := e.name
-			if ri > 0 {
-				routerName = fmt.Sprintf("%s-%d", e.name, ri)
-			}
+			name := routerName(e.name, ri)
 			rule := fmt.Sprintf("Host(`%s`)", domain)
 			if route.Path != "" {
 				rule = fmt.Sprintf("Host(`%s`) && PathPrefix(`%s`)", domain, route.Path)
 			}
 
-			sb.WriteString(fmt.Sprintf("    %s:\n", routerName))
+			sb.WriteString(fmt.Sprintf("    %s:\n", name))
 			sb.WriteString(fmt.Sprintf("      rule: \"%s\"\n", rule))
 			sb.WriteString(fmt.Sprintf("      service: %s\n", e.name))
 			sb.WriteString("      entryPoints:\n")
 			sb.WriteString("        - websecure\n")
 			sb.WriteString("      tls:\n")
 			sb.WriteString("        certResolver: letsencrypt\n")
+			var mws []string
 			if hasAllowList {
+				mws = append(mws, "vpn-only")
+			}
+			if route.StripPrefix && route.Path != "" {
+				mws = append(mws, name+"-strip")
+			}
+			if len(mws) > 0 {
 				sb.WriteString("      middlewares:\n")
-				sb.WriteString("        - vpn-only\n")
+				for _, m := range mws {
+					sb.WriteString(fmt.Sprintf("        - %s\n", m))
+				}
 			}
 			if route.Priority > 0 {
 				sb.WriteString(fmt.Sprintf("      priority: %d\n", route.Priority))

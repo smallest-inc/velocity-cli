@@ -291,6 +291,12 @@ services:
     port: 8080
     routes:
       - path: /payment/
+  dispatcher:
+    path: ./apps/dispatcher
+    port: 8081
+    routes:
+      - path: /dispatch/
+        strip_prefix: true              # service serves at /, so /dispatch/health → /health
 
 lifecycle:
   setup: |
@@ -356,6 +362,7 @@ network:
 | `remote` | Remote path and SSH user on the instance |
 | `runtime` | Dependencies to check/install (node, go, docker, etc.) |
 | `services` | Service definitions with ports and Traefik routes |
+| `services.<name>.routes[].strip_prefix` | Strip the route path before proxying, for services that serve at `/` |
 | `lifecycle` | Commands for setup, start, stop |
 | `sync` | rsync exclude/include patterns |
 | `sync.env_rewrite_vars` | Env var prefixes to rewrite `localhost:PORT` → instance domain |
@@ -364,6 +371,8 @@ network:
 | `dependencies.docker` | Docker containers to run (managed with start/stop, data preserved) |
 | `dependencies.docker.cmd` | Optional argv override for a docker dep's default CMD |
 | `network.allowed_ips` | Traefik IP allowlist for HTTPS routes |
+
+TLS certificates come from Let's Encrypt via the TLS-ALPN-01 challenge on `:443`, so `:80` can stay VPN-only.
 
 ### Env Rewrite
 
