@@ -57,8 +57,9 @@ type Service struct {
 
 // Route describes a Traefik route for a service.
 type Route struct {
-	Path     string `yaml:"path"`
-	Priority int    `yaml:"priority"`
+	Path        string `yaml:"path"`
+	Priority    int    `yaml:"priority"`
+	StripPrefix bool   `yaml:"strip_prefix,omitempty"` // strip Path before proxying, for services that serve at /
 }
 
 // NetworkConfig describes network/access control settings.
